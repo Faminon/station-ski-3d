@@ -1,36 +1,45 @@
-// Worker des sapins 3D : fabrique les tuiles vectorielles des forêts hors du
-// fil principal, qui reste libre pour dessiner la carte.
+// Worker des sapins 3D : plante les arbres des forêts hors du fil principal, qui
+// reste libre pour dessiner la carte.
 //
 // Messages reçus :
-//   { type: 'forests', set, polygons }    forêts d'une carte (remplace les précédentes)
-//   { type: 'clearings', set, clearings } couloirs à laisser sans arbres
-//   { type: 'tile', id, set, z, x, y }    demande d'une tuile
-//   { type: 'cancel', id }                tuile devenue inutile (vue déjà ailleurs)
-//   { type: 'drop', set }                 carte fermée
-// Réponse : { id, data: ArrayBuffer } (transféré) ou { id, error }.
+//   { type: 'forests', set, polygons }      forêts d'une carte (remplace les précédentes)
+//   { type: 'clearings', set, clearings }   couloirs à laisser sans arbres
+//   { type: 'tile', id, set, z, x, y }      tuile vectorielle (rendu de repli en « fill-extrusion »)
+//   { type: 'instances', id, set, z, x, y } liste d'arbres de la tuile (calque instancié)
+//   { type: 'cancel', id }                  demande devenue inutile (vue déjà ailleurs)
+//   { type: 'drop', set }                   carte fermée
+// Réponses : { id, data: ArrayBuffer } pour une tuile vectorielle,
+//            { id, data: Float32Array, ranks: Float32Array } pour une liste d'arbres (transférées),
+//            { id, error } en cas d'échec.
 
-import { buildForestSet, plantTile, setClearings, type Clearing, type ForestSet } from './forestPlanting';
+import { buildForestSet, plantTile, plantTileInstances, setClearings, type Clearing, type ForestSet } from './forestPlanting';
 
+type Job = { type: 'tile' | 'instances'; id: number; set: string; z: number; x: number; y: number };
 type Msg =
   | { type: 'forests'; set: string; polygons: number[][][][] }
   | { type: 'clearings'; set: string; clearings: Clearing[] }
-  | { type: 'tile'; id: number; set: string; z: number; x: number; y: number }
+  | Job
   | { type: 'cancel'; id: number }
   | { type: 'drop'; set: string };
 
 const sets = new Map<string, ForestSet>();
-const queue: Extract<Msg, { type: 'tile' }>[] = [];
+const queue: Job[] = [];
 let scheduled = false;
 
-/** Une tuile par tour de boucle : une annulation arrivée entre-temps est prise en compte. */
+/** Une demande par tour de boucle : une annulation arrivée entre-temps est prise en compte. */
 function work() {
   scheduled = false;
   const job = queue.shift();
   if (!job) return;
   const set = sets.get(job.set);
   try {
-    const data = set ? plantTile(set, job.z, job.x, job.y) : new ArrayBuffer(0);
-    postMessage({ id: job.id, data }, { transfer: [data] });
+    if (job.type === 'instances') {
+      const { data, ranks } = set ? plantTileInstances(set, job.z, job.x, job.y) : { data: new Float32Array(0), ranks: new Float32Array(0) };
+      postMessage({ id: job.id, data, ranks }, { transfer: [data.buffer, ranks.buffer] });
+    } else {
+      const data = set ? plantTile(set, job.z, job.x, job.y) : new ArrayBuffer(0);
+      postMessage({ id: job.id, data }, { transfer: [data] });
+    }
   } catch (e) {
     postMessage({ id: job.id, error: String(e) });
   }
@@ -55,6 +64,7 @@ self.onmessage = (e: MessageEvent<Msg>) => {
       break;
     }
     case 'tile':
+    case 'instances':
       queue.push(msg);
       schedule();
       break;

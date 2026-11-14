@@ -20,6 +20,8 @@ import { PARK_FEATURES_LAYER, addParkFeatures } from './parkFeatures';
 import { addForestTrees, largestForestCenter, type ForestController } from './forestTrees';
 import { installPerfProbe } from './perfProbe';
 import { installAdaptiveQuality } from './adaptiveQuality';
+import { installFrameLimiter } from './frameLimiter';
+import { tuneMapPerformance } from './mapPerformance';
 import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, type BuiltArea } from './mountainBuildings';
 import { LIFT_3D_LAYERS, addLifts3d, type LiftsController } from '@/components/station/liftAnimation';
 import { type Base, addForests, applyWinter, TERRAIN_EXAGGERATION, TERRAIN_STYLE, facadeColor, pisteGeoJson, placePopupContent, supportsWebGL } from '@/components/station/map3d';
@@ -621,7 +623,11 @@ export default function Domain3DViewer({
     // Sapins 3D : pistes, remontées et routes restent dégagées (données arrivées dans n'importe quel ordre).
     let forestTrees: ForestController | undefined;
     // Qualité adaptative : la carte s'allège d'elle-même si l'appareil ne suit pas en mouvement.
-    const quality = installAdaptiveQuality(map, { setTreeDensity: (d) => forestTrees?.setDensity(d) });
+    // Réglages de MapLibre (drapage sur le relief, tuiles lointaines, ordre des calques) : voir mapPerformance.ts.
+    const stopTuning = tuneMapPerformance(map);
+    // Cadence régulière : une image tous les N rafraîchissements de l'écran, proche de 40 par seconde.
+    const limiter = installFrameLimiter(map);
+    const quality = installAdaptiveQuality(map, limiter, { setTreeDensity: (d) => forestTrees?.setDensity(d) });
     let parkReady: Promise<void> = Promise.resolve();
     const markBoot = (step: BootStep) => !cancelled && setBoot((prev) => (prev.includes(step) ? prev : [...prev, step]));
     // Filet de sécurité : jamais plus de 30 s d'écran de chargement, même si une donnée n'arrive pas.
@@ -704,7 +710,7 @@ export default function Domain3DViewer({
         quality.refresh();
       }
       // Banc d'essai (?fps, ?bench) : le parcours plonge sur la plus grande forêt du domaine.
-      stopPerfProbe = installPerfProbe(map, domain.center, largestForestCenter(forests) ?? domain.center, quality);
+      stopPerfProbe = installPerfProbe(map, domain.center, largestForestCenter(forests) ?? domain.center, quality, limiter);
       if (roads?.features?.length) {
         addRoads(map, roads);
         roadLines = (roads as GeoJSON.FeatureCollection).features.flatMap((f) => (f.geometry.type === 'LineString' ? [f.geometry.coordinates] : []));
@@ -1152,6 +1158,8 @@ export default function Domain3DViewer({
       stopBuildings?.();
       stopPerfProbe?.();
       quality.stop();
+      limiter.stop();
+      stopTuning();
       forestTrees?.stop();
       markers.forEach((m) => m.remove());
       popupRef.current?.remove();

@@ -22,8 +22,8 @@ const EARTH_CIRCUMFERENCE = 40_075_016.686;
 const SPACING = 11;
 const MAX_SCALE = 5;
 
-const GREENS = ['#1f3b2b', '#264532', '#2d503b'];
-const SNOW_CAP = '#e4edf1';
+export const GREENS = ['#1f3b2b', '#264532', '#2d503b'];
+export const SNOW_CAP = '#e4edf1';
 
 type Ring = number[][];
 interface Forest {
@@ -140,18 +140,29 @@ const tileLat = (y: number, n: number) => (Math.atan(Math.sinh(Math.PI * (1 - (2
 /** Hexagones des six angles, calculés une fois (sens horaire à l'écran, y vers le bas). */
 const HEX = Array.from({ length: 6 }, (_, a) => [Math.cos((a / 6) * Math.PI * 2), Math.sin((a / 6) * Math.PI * 2)]);
 
-/** Tuile vectorielle des sapins (z, x, y), vide hors des forêts. */
-export function plantTile(set: ForestSet, z: number, x: number, y: number): ArrayBuffer {
-  const layer = new MvtLayer(TREES_SOURCE_LAYER);
+/** Un sapin planté : pied, hauteur et largeur (m), teinte (indice dans GREENS), rang (0 à 0,95). */
+interface Tree {
+  lng: number;
+  lat: number;
+  h: number;
+  w: number;
+  green: number;
+  rank: number;
+}
+
+/** Bornes géographiques de la tuile (z, x, y). */
+function tileBounds(z: number, x: number, y: number) {
   const n = 2 ** z;
-  const west = tileLng(x, n);
-  const east = tileLng(x + 1, n);
-  const north = tileLat(y, n);
-  const south = tileLat(y + 1, n);
+  return { n, west: tileLng(x, n), east: tileLng(x + 1, n), north: tileLat(y, n), south: tileLat(y + 1, n) };
+}
+
+/** Plante les sapins de la tuile (z, x, y) ; rien hors des forêts. */
+function forEachTree(set: ForestSet, z: number, x: number, y: number, plant: (tree: Tree) => void) {
+  const { west, east, north, south } = tileBounds(z, x, y);
   const [bw, bs, be, bn] = set.bbox;
-  if (east < bw || west > be || north < bs || south > bn) return encodeTile([layer]);
+  if (east < bw || west > be || north < bs || south > bn) return;
   const near = set.forests.filter((f) => f.bbox[0] <= east && f.bbox[2] >= west && f.bbox[1] <= north && f.bbox[3] >= south);
-  if (!near.length) return encodeTile([layer]);
+  if (!near.length) return;
 
   // Espacement doublé à chaque niveau de zoom en moins (11 m en tuile 16, ~17 m en 15, ~34 m en 14,
   // ~67 m en 13) : environ 2 500 cases par tuile au plus, quel que soit le zoom. Les arbres
@@ -159,18 +170,7 @@ export function plantTile(set: ForestSet, z: number, x: number, y: number): Arra
   const spacing = Math.ceil(Math.max(SPACING, SPACING * 2 ** (15.6 - z)));
   const k = Math.min(MAX_SCALE, spacing / SPACING);
   const kv = Math.sqrt(k);
-  // Tuiles lointaines : arbres simplifiés, à peine différents vus de loin.
-  const detailed = z >= 15;
-
   const { lng0, lat0, mx } = set;
-  // Mercator : même échelle sur les deux axes, prise au centre de la tuile.
-  const midLat = (north + south) / 2;
-  const unitsPerMeter = (MVT_EXTENT * n) / (EARTH_CIRCUMFERENCE * Math.cos((midLat * Math.PI) / 180));
-  const toTileX = (lng: number) => (((lng + 180) / 360) * n - x) * MVT_EXTENT;
-  const toTileY = (lat: number) => {
-    const r = (lat * Math.PI) / 180;
-    return (((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n - y) * MVT_EXTENT;
-  };
 
   // Cases dont l'arbre peut tomber dans la tuile ; chaque arbre appartient à la seule tuile qui contient son pied.
   const i0 = Math.floor(((west - lng0) * mx) / spacing) - 1;
@@ -189,36 +189,89 @@ export function plantTile(set: ForestSet, z: number, x: number, y: number): Arra
       if (lng < west || lng >= east || lat < south || lat >= north) continue;
       if (!near.some((f) => insideForest(lng, lat, f))) continue;
       if (set.cleared(px, py)) continue;
-
-      // Sapins de 9 à 16 m, plus ou moins larges.
-      const h = (9 + 7 * hash(i * 3 + 1, j * 5 + 2)) * kv;
-      const w = (0.85 + 0.3 * r1) * k;
-      const green = GREENS[Math.floor(r2 * GREENS.length)];
-      // Rang de l'arbre (0 à 0,95, par pas de 0,05), commun à ses volumes : la qualité adaptative
-      // éclaircit la forêt d'un simple filtre (« r < densité »), sans refabriquer les tuiles.
-      const rank = Math.floor(hash(i * 7 + 3, j * 11 + 5) * 20) / 20;
-      const tx = toTileX(lng);
-      const ty = toTileY(lat);
-      const vol = (r: number, base: number, top: number, color: string) => {
-        const ru = r * unitsPerMeter;
-        const ring: number[] = [];
-        for (const [c, s] of HEX) ring.push(tx + c * ru, ty + s * ru);
-        layer.addPolygon(ring, { c: color, b: Math.round(base * 10) / 10, h: Math.round(top * 10) / 10, r: rank });
-      };
-      // La carte graphique dessine ~16 triangles par volume : pas de tronc (caché sous les branches
-      // dès que la vue est inclinée). De près, trois étages en cône et une pointe enneigée ; au loin,
-      // deux étages suffisent.
-      if (detailed) {
-        vol(2.6 * w, 0.06 * h, 0.5 * h, green);
-        vol(1.9 * w, 0.45 * h, 0.75 * h, green);
-        vol(1.1 * w, 0.7 * h, 0.94 * h, green);
-        vol(0.55 * w, 0.88 * h, h, SNOW_CAP);
-      } else {
-        vol(2.4 * w, 0.08 * h, 0.6 * h, green);
-        vol(1.4 * w, 0.55 * h, 0.92 * h, green);
-        vol(0.55 * w, 0.86 * h, h, SNOW_CAP);
-      }
+      plant({
+        lng,
+        lat,
+        // Sapins de 9 à 16 m, plus ou moins larges.
+        h: (9 + 7 * hash(i * 3 + 1, j * 5 + 2)) * kv,
+        w: (0.85 + 0.3 * r1) * k,
+        green: Math.floor(r2 * GREENS.length),
+        // Rang (0 à 0,95, par pas de 0,05) : la qualité adaptative éclaircit la forêt en ne gardant
+        // que les arbres de rang inférieur à la densité voulue, sans refabriquer les tuiles.
+        rank: Math.floor(hash(i * 7 + 3, j * 11 + 5) * 20) / 20,
+      });
     }
   }
+}
+
+const mercatorX = (lng: number) => (lng + 180) / 360;
+const mercatorY = (lat: number) => {
+  const r = (lat * Math.PI) / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2;
+};
+
+/** Valeurs par sapin dans `plantTileInstances` : décalage mercator (x, y), hauteur, largeur, teinte. */
+export const TREE_INSTANCE_FLOATS = 5;
+
+/**
+ * Sapins de la tuile (z, x, y) pour le calque instancié (forestInstanced.ts) : par arbre, décalage
+ * en coordonnées mercator depuis le coin nord-ouest de la tuile, hauteur et largeur (m) et teinte.
+ * Les arbres sont triés par rang : les `n` premiers sont ceux de rang inférieur à une densité donnée
+ * (`ranks` permet de trouver `n`).
+ */
+export function plantTileInstances(set: ForestSet, z: number, x: number, y: number): { data: Float32Array; ranks: Float32Array } {
+  const trees: Tree[] = [];
+  forEachTree(set, z, x, y, (tree) => trees.push(tree));
+  trees.sort((a, b) => a.rank - b.rank);
+  const n = 2 ** z;
+  const data = new Float32Array(trees.length * TREE_INSTANCE_FLOATS);
+  const ranks = new Float32Array(trees.length);
+  trees.forEach((t, i) => {
+    const o = i * TREE_INSTANCE_FLOATS;
+    // Décalages calculés en double précision, puis petits : la précision des flottants simples suffit.
+    data[o] = mercatorX(t.lng) - x / n;
+    data[o + 1] = mercatorY(t.lat) - y / n;
+    data[o + 2] = t.h;
+    data[o + 3] = t.w;
+    data[o + 4] = t.green;
+    ranks[i] = t.rank;
+  });
+  return { data, ranks };
+}
+
+/** Tuile vectorielle des sapins (z, x, y), vide hors des forêts : rendu de repli en « fill-extrusion ». */
+export function plantTile(set: ForestSet, z: number, x: number, y: number): ArrayBuffer {
+  const layer = new MvtLayer(TREES_SOURCE_LAYER);
+  const { n, north, south } = tileBounds(z, x, y);
+  // Tuiles lointaines : arbres simplifiés, à peine différents vus de loin.
+  const detailed = z >= 15;
+  // Mercator : même échelle sur les deux axes, prise au centre de la tuile.
+  const midLat = (north + south) / 2;
+  const unitsPerMeter = (MVT_EXTENT * n) / (EARTH_CIRCUMFERENCE * Math.cos((midLat * Math.PI) / 180));
+
+  forEachTree(set, z, x, y, ({ lng, lat, h, w, green: greenIndex, rank }) => {
+    const green = GREENS[greenIndex];
+    const tx = (mercatorX(lng) * n - x) * MVT_EXTENT;
+    const ty = (mercatorY(lat) * n - y) * MVT_EXTENT;
+    const vol = (r: number, base: number, top: number, color: string) => {
+      const ru = r * unitsPerMeter;
+      const ring: number[] = [];
+      for (const [c, s] of HEX) ring.push(tx + c * ru, ty + s * ru);
+      layer.addPolygon(ring, { c: color, b: Math.round(base * 10) / 10, h: Math.round(top * 10) / 10, r: rank });
+    };
+    // La carte graphique dessine ~16 triangles par volume : pas de tronc (caché sous les branches
+    // dès que la vue est inclinée). De près, trois étages en cône et une pointe enneigée ; au loin,
+    // deux étages suffisent.
+    if (detailed) {
+      vol(2.6 * w, 0.06 * h, 0.5 * h, green);
+      vol(1.9 * w, 0.45 * h, 0.75 * h, green);
+      vol(1.1 * w, 0.7 * h, 0.94 * h, green);
+      vol(0.55 * w, 0.88 * h, h, SNOW_CAP);
+    } else {
+      vol(2.4 * w, 0.08 * h, 0.6 * h, green);
+      vol(1.4 * w, 0.55 * h, 0.92 * h, green);
+      vol(0.55 * w, 0.86 * h, h, SNOW_CAP);
+    }
+  });
   return encodeTile([layer]);
 }
