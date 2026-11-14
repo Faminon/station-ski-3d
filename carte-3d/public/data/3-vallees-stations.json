@@ -1,0 +1,71 @@
+{
+  "stations": [
+    {
+      "id": "courchevel",
+      "name": "Courchevel",
+      "village": true
+    },
+    {
+      "id": "les-menuires",
+      "name": "Les Menuires",
+      "village": true
+    },
+    {
+      "id": "meribel",
+      "name": "Méribel",
+      "village": true
+    },
+    {
+      "id": "val-thorens",
+      "name": "Val Thorens",
+      "village": true
+    }
+  ],
+  "builtAreas": [
+    {
+      "lat": 45.4144,
+      "lng": 6.6347,
+      "radius": 750
+    },
+    {
+      "lat": 45.4179,
+      "lng": 6.6526,
+      "radius": 550
+    },
+    {
+      "lat": 45.4222,
+      "lng": 6.6435,
+      "radius": 450
+    },
+    {
+      "lat": 45.4326,
+      "lng": 6.622,
+      "radius": 500
+    },
+    {
+      "lat": 45.4314,
+      "lng": 6.5965,
+      "radius": 450
+    },
+    {
+      "lat": 45.3241,
+      "lng": 6.5383,
+      "radius": 1700
+    },
+    {
+      "lat": 45.3968,
+      "lng": 6.5656,
+      "radius": 900
+    },
+    {
+      "lat": 45.3735,
+      "lng": 6.581,
+      "radius": 600
+    },
+    {
+      "lat": 45.29777,
+      "lng": 6.58377,
+      "radius": 1700
+    }
+  ]
+}

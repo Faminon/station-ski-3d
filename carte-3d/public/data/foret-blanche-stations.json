@@ -1,0 +1,31 @@
+{
+  "stations": [
+    {
+      "id": "risoul",
+      "name": "Risoul",
+      "village": true
+    },
+    {
+      "id": "vars",
+      "name": "Vars",
+      "village": true
+    }
+  ],
+  "builtAreas": [
+    {
+      "lat": 44.6229,
+      "lng": 6.6358,
+      "radius": 1700
+    },
+    {
+      "lat": 44.5726,
+      "lng": 6.6816,
+      "radius": 900
+    },
+    {
+      "lat": 44.5938,
+      "lng": 6.6912,
+      "radius": 550
+    }
+  ]
+}

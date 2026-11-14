@@ -1,0 +1,2 @@
+# Fichiers de police de la carte (glyphes MapLibre) : binaires, à ne jamais convertir.
+*.pbf binary

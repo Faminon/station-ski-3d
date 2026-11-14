@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans), "Inter", sans-serif;
+  --font-mono: var(--font-geist-mono), monospace;
+  --font-display: var(--font-fraunces), "Georgia", serif;
+
+  /* Alpine Editorial — cool glacier palette for structure/info */
+  --color-winter-50: #eef4f8;
+  --color-winter-100: #dde8f0;
+  --color-winter-200: #c3d9e8;
+  --color-winter-300: #9dc0da;
+  --color-winter-400: #6fa0c4;
+  --color-winter-500: #4a80a8;
+  --color-winter-600: #386690;
+  --color-winter-700: #2f5375;
+  --color-winter-800: #2a4560;
+  --color-winter-900: #1c2e40;
+
+  --color-ice-100: #e7f1f7;
+  --color-ice-200: #c7e2ef;
+
+  /* Warm neutrals — snow/ivory instead of clinical blue-gray */
+  --color-background: #faf8f3;
+  --color-foreground: #1b1d22;
+  --color-card: #ffffff;
+  --color-card-foreground: #1b1d22;
+
+  --color-primary: #2f5c7d;
+  --color-primary-foreground: #ffffff;
+
+  /* Warm copper accent — CTAs, highlights, "chalet" contrast to the cold blue */
+  --color-accent: #b8763f;
+  --color-accent-50: #fbf1e6;
+  --color-accent-600: #a3652f;
+  --color-accent-foreground: #ffffff;
+}
+
+@layer base {
+  :root {
+    --background: #faf8f3;
+    --foreground: #1b1d22;
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
