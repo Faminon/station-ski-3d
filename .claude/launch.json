@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "carte-3d", "run", "dev"],
       "port": 3001
+    },
+    {
+      "name": "carte-3d-prod-3002",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--prefix", "carte-3d", "next", "start", "carte-3d", "-p", "3002"],
+      "port": 3002
     }
   ]
 }

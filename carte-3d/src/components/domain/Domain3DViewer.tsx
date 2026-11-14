@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FullscreenControl, GeolocateControl, LngLatBounds, Map as MlMap, Marker, NavigationControl, Popup, ScaleControl, type FilterSpecification, type GeoJSONSource } from 'maplibre-gl';
+import { FullscreenControl, GeolocateControl, LngLatBounds, Map as MlMap, Marker, NavigationControl, Popup, ScaleControl, type FilterSpecification, type GeoJSONSource, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { ArrowLeft, Box, Cable, Check, ExternalLink, Layers, Loader2, LocateFixed, Map as MapIcon, Maximize2, Navigation, RotateCw, Search, Share2, X } from 'lucide-react';
 import { DIFFICULTY_LABELS, PISTE_COLORS, type PisteDifficulty, type StationPisteMap } from '@/lib/apis/overpass';
@@ -17,7 +17,9 @@ import { buildSkiGraph, planRoute, trimRoute, type RouteResult, type RouteTarget
 import { PARK_COLORS, parkZoneFeatures } from './parkZones';
 import { formatDistance, nearestLine, nearestPoint, type NamedLine, type Nearest } from './nearby';
 import { PARK_FEATURES_LAYER, addParkFeatures } from './parkFeatures';
-import { addForestTrees, type ForestController } from './forestTrees';
+import { addForestTrees, largestForestCenter, type ForestController } from './forestTrees';
+import { installPerfProbe } from './perfProbe';
+import { installAdaptiveQuality } from './adaptiveQuality';
 import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, type BuiltArea } from './mountainBuildings';
 import { LIFT_3D_LAYERS, addLifts3d, type LiftsController } from '@/components/station/liftAnimation';
 import { type Base, addForests, applyWinter, TERRAIN_EXAGGERATION, TERRAIN_STYLE, facadeColor, pisteGeoJson, placePopupContent, supportsWebGL } from '@/components/station/map3d';
@@ -533,8 +535,11 @@ export default function Domain3DViewer({
       pitch: OVERVIEW_PITCH,
       bearing: domain.overviewBearing,
       ...sharedView,
-      maxPitch: 80,
+      // 70° au plus : au-delà, la vue file jusqu'à l'horizon et charge des centaines de tuiles lointaines.
+      maxPitch: 70,
       minZoom: 9,
+      // Écrans très denses (téléphones ×3) : rendu plafonné à ×2, soit plus de deux fois moins de pixels à dessiner.
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       locale: {
         'GeolocateControl.FindMyLocation': 'Me localiser',
         'GeolocateControl.LocationNotAvailable': 'Localisation indisponible',
@@ -612,8 +617,11 @@ export default function Domain3DViewer({
 
     const markers: Marker[] = [];
     let stopBuildings: (() => void) | undefined;
+    let stopPerfProbe: (() => void) | undefined;
     // Sapins 3D : pistes, remontées et routes restent dégagées (données arrivées dans n'importe quel ordre).
     let forestTrees: ForestController | undefined;
+    // Qualité adaptative : la carte s'allège d'elle-même si l'appareil ne suit pas en mouvement.
+    const quality = installAdaptiveQuality(map, { setTreeDensity: (d) => forestTrees?.setDensity(d) });
     let parkReady: Promise<void> = Promise.resolve();
     const markBoot = (step: BootStep) => !cancelled && setBoot((prev) => (prev.includes(step) ? prev : [...prev, step]));
     // Filet de sécurité : jamais plus de 30 s d'écran de chargement, même si une donnée n'arrive pas.
@@ -626,8 +634,12 @@ export default function Domain3DViewer({
         ...roadLines.map((coordinates) => ({ coordinates, halfWidth: 7 })),
       ]);
     const minorPeaks: HTMLElement[] = [];
+    // Appelé à chaque image du zoom : on ne touche aux pastilles qu'au passage du seuil.
+    let peaksShown: boolean | undefined;
     const syncPeaks = () => {
       const show = map.getZoom() >= MINOR_PEAKS_ZOOM;
+      if (show === peaksShown) return;
+      peaksShown = show;
       minorPeaks.forEach((el) => (el.style.display = show ? '' : 'none'));
     };
 
@@ -689,7 +701,10 @@ export default function Domain3DViewer({
       if (forests?.features?.length) {
         addForests(map, forests, winter, 'pistes-casing');
         forestTrees = addForestTrees(map, forests, winter, 'pistes-casing');
+        quality.refresh();
       }
+      // Banc d'essai (?fps, ?bench) : le parcours plonge sur la plus grande forêt du domaine.
+      stopPerfProbe = installPerfProbe(map, domain.center, largestForestCenter(forests) ?? domain.center, quality);
       if (roads?.features?.length) {
         addRoads(map, roads);
         roadLines = (roads as GeoJSON.FeatureCollection).features.flatMap((f) => (f.geometry.type === 'LineString' ? [f.geometry.coordinates] : []));
@@ -1021,7 +1036,19 @@ export default function Domain3DViewer({
 
       // Survol : nom de la piste ou de la remontée, et altitude du terrain sous le curseur.
       let hoverKey = '';
+      // Au plus une recherche par image (la souris envoie souvent plusieurs mouvements entre deux
+      // images), et aucune pendant que la carte bouge : le survol attend que la vue se pose.
+      let hoverEvent: MapMouseEvent | null = null;
+      let hoverFrame = 0;
       map.on('mousemove', (e) => {
+        hoverEvent = e;
+        if (!hoverFrame) hoverFrame = requestAnimationFrame(flushHover);
+      });
+      const flushHover = () => {
+        hoverFrame = 0;
+        const e = hoverEvent;
+        hoverEvent = null;
+        if (!e || cancelled || map.isMoving()) return;
         const alt = map.queryTerrainElevation(e.lngLat);
         if (altitudeRef.current) {
           altitudeRef.current.textContent = alt === null ? '—' : `${Math.round(alt / TERRAIN_EXAGGERATION).toLocaleString('fr-FR')} m`;
@@ -1071,7 +1098,7 @@ export default function Domain3DViewer({
           map.setFilter('hover', name ? ['all', ['==', ['get', 'name'], name], ['==', ['get', 'difficulty'], difficulty]] : none);
           setHover({ color: PISTE_COLORS[difficulty], title: name || 'Liaison', detail: DIFFICULTY_SINGULAR[difficulty] });
         }
-      });
+      };
 
       // Villages et sommets, posés sur le relief ; MapLibre les estompe derrière une crête.
       for (const valley of domain.valleys) {
@@ -1123,6 +1150,8 @@ export default function Domain3DViewer({
       liftsRef.current = null;
       geolocateRef.current = null;
       stopBuildings?.();
+      stopPerfProbe?.();
+      quality.stop();
       forestTrees?.stop();
       markers.forEach((m) => m.remove());
       popupRef.current?.remove();
@@ -1687,7 +1716,7 @@ export default function Domain3DViewer({
 
       {/* Panneau du domaine */}
       {panelOpen && (
-        <aside className="absolute inset-x-3 bottom-3 z-20 flex max-h-[62vh] flex-col overflow-hidden rounded-3xl border border-white/60 bg-card/95 shadow-2xl backdrop-blur-md sm:right-auto sm:top-3 sm:max-h-none sm:w-[348px]">
+        <aside className="absolute inset-x-3 bottom-3 z-20 flex max-h-[62vh] flex-col overflow-hidden rounded-3xl border border-white/60 bg-card/95 shadow-2xl sm:right-auto sm:top-3 sm:max-h-none sm:w-[348px]">
           <div className="border-b border-winter-100 px-5 pb-4 pt-4">
             <div className="flex items-center justify-between">
               {embedded ? (
@@ -2023,7 +2052,7 @@ export default function Domain3DViewer({
       {/* Fiche « Ma position » */}
       {ready && !routeOpen && geoStatus === 'on' && here && (
         <div className={`pointer-events-none absolute bottom-4 z-10 flex justify-center px-3 sm:bottom-16 ${panelOpen ? 'left-0 right-0 sm:left-[372px]' : 'left-0 right-0'}`}>
-          <div className="pointer-events-auto w-full max-w-sm rounded-2xl border border-white/60 bg-card/95 p-4 text-sm shadow-xl backdrop-blur-md">
+          <div className="pointer-events-auto w-full max-w-sm rounded-2xl border border-white/60 bg-card/95 p-4 text-sm shadow-xl">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="flex items-center gap-1.5 font-semibold text-foreground">
@@ -2100,7 +2129,7 @@ export default function Domain3DViewer({
         <div
           className={`pointer-events-none absolute bottom-4 z-10 hidden justify-center sm:flex ${panelOpen ? 'left-0 right-0 sm:left-[372px]' : 'left-0 right-0'}`}
         >
-          <div className="flex items-center gap-3 rounded-full border border-white/60 bg-card/95 px-4 py-2 text-xs shadow-lg backdrop-blur-md">
+          <div className="flex items-center gap-3 rounded-full border border-white/60 bg-card/95 px-4 py-2 text-xs shadow-lg">
             {hover && (
               <span className="flex items-center gap-2 border-r border-winter-200 pr-3">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hover.color }} />

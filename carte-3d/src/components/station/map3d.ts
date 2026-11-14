@@ -1,7 +1,7 @@
 // Socle commun des cartes 3D (vue d'une station, carte des 3 Vallées) : fonds,
 // relief, conversion du plan des pistes. Réservé au navigateur (MapLibre, WebGL).
 
-import { getVersion, setWorkerUrl, type Map as MlMap, type StyleSpecification } from 'maplibre-gl';
+import { getVersion, setWorkerUrl, type ExpressionSpecification, type Map as MlMap, type StyleSpecification } from 'maplibre-gl';
 import type { StationPisteMap } from '@/lib/apis/overpass';
 import { IGN_ATTRIBUTION, IGN_MAX_ZOOM, IGN_ORTHO_URL, IGN_PLAN_URL } from '@/lib/ignTiles';
 import { isSkierLift } from '@/lib/pisteStats';
@@ -74,6 +74,11 @@ function treePattern(): ImageData {
   return ctx.getImageData(0, 0, size, size);
 }
 
+/** Calque du motif de sapins au sol. */
+export const FOREST_PATTERN_LAYER = 'forest-trees';
+/** Motif au sol pour la vue d'ensemble, effacé de près au profit des sapins 3D (forestTrees.ts). */
+export const FOREST_PATTERN_OPACITY: ExpressionSpecification = ['interpolate', ['linear'], ['zoom'], 13.4, 0.95, 14.2, 0];
+
 /**
  * Forêts en sapins sur la neige, sous les pistes (`beforeId`). `visible` suit
  * l'interrupteur de la neige au moment où les données arrivent.
@@ -82,14 +87,13 @@ export function addForests(map: MlMap, data: GeoJSON.FeatureCollection, visible:
   map.addImage('trees', treePattern(), { pixelRatio: 2 });
   map.addSource('forests', { type: 'geojson', data });
   const layout = { visibility: visible ? ('visible' as const) : ('none' as const) };
-  // Motif au sol pour la vue d'ensemble, effacé de près au profit des sapins 3D (forestTrees.ts).
   map.addLayer(
     {
-      id: 'forest-trees',
+      id: FOREST_PATTERN_LAYER,
       type: 'fill',
       source: 'forests',
       layout,
-      paint: { 'fill-pattern': 'trees', 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 13.4, 0.95, 14.2, 0] },
+      paint: { 'fill-pattern': 'trees', 'fill-opacity': FOREST_PATTERN_OPACITY },
     },
     beforeId,
   );

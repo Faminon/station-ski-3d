@@ -1,147 +1,140 @@
-// Forêts en sapins 3D sur la carte d'un domaine : chaque arbre est un petit
-// volume (tronc et trois étages de branches, pointe enneigée), posé sur le
-// relief en « fill-extrusion », comme les remontées.
+// Forêts en sapins 3D sur la carte d'un domaine, posées sur le relief en
+// « fill-extrusion », comme les remontées.
 //
-// Économie : on ne plante que les arbres de la vue courante, à partir du zoom
-// FOREST_MIN_ZOOM, sur une grille fixe (un arbre par case, légèrement décalé)
-// pour qu'ils ne bougent pas quand on se déplace. Les arbres grossissent et
-// s'espacent en dézoomant, pour garder la même densité à l'écran. Les pistes,
-// les remontées et les routes restent dégagées.
+// Les arbres sont servis comme des tuiles vectorielles (protocole trees://),
+// fabriquées dans un Web Worker (forestTiles.worker.ts, forestPlanting.ts).
+// MapLibre ne demande que les tuiles visibles, les garde en cache et les
+// prépare dans ses propres workers : se déplacer ne recalcule que les tuiles
+// nouvelles, sans jamais bloquer le fil principal qui dessine la carte.
 
-import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
-import type { Feature, FeatureCollection, Polygon } from 'geojson';
-import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/components/station/map3d';
+import { addProtocol, type Map as MlMap, type VectorTileSource } from 'maplibre-gl';
+import type { FeatureCollection } from 'geojson';
+import { FOREST_PATTERN_LAYER, FOREST_PATTERN_OPACITY } from '@/components/station/map3d';
+import { TREES_MAX_TILE_ZOOM, TREES_MIN_TILE_ZOOM, TREES_SOURCE_LAYER, type Clearing } from './forestPlanting';
+
+export type { Clearing } from './forestPlanting';
 
 export const FOREST_3D_LAYER = 'forest-3d';
 /** En dessous, le motif de sapins au sol suffit ; au-dessus, il s'efface au profit des arbres 3D. */
 export const FOREST_MIN_ZOOM = 13.5;
-const REF_ZOOM = 15.5;
-const MAX_SCALE = 5;
-/** Écart moyen entre deux arbres à l'échelle de référence (m). */
-const SPACING = 11;
-const MAX_TREES = 6000;
-/** Cases examinées au plus : au-delà, la grille s'élargit (forêt moins dense, mêmes performances). */
-const MAX_CELLS = 45_000;
-const REFRESH_MS = 120;
 
-/** Couloirs sans arbres : demi-largeur dégagée de part et d'autre du tracé (m). */
-export interface Clearing {
-  coordinates: number[][];
-  halfWidth: number;
-}
+// ---- Worker et protocole trees://<carte>/<version>/{z}/{x}/{y} -------------------
 
-type Ring = number[][];
-interface Forest {
-  rings: Ring[];
-  bbox: [number, number, number, number];
-}
-type Volume = Feature<Polygon, { c: string; b: number; h: number }>;
+type Pending = { resolve: (data: ArrayBuffer) => void; reject: (e: Error) => void };
+const pending = new Map<number, Pending>();
+let worker: Worker | null = null;
+let seq = 0;
 
-const TRUNK = '#5b4636';
-const GREENS = ['#1f3b2b', '#264532', '#2d503b'];
-const SNOW_CAP = '#e4edf1';
-
-function hash(i: number, j: number): number {
-  let h = Math.imul(i, 374761393) + Math.imul(j, 668265263);
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 2 ** 32;
-}
-
-function insideRing(x: number, y: number, ring: Ring): boolean {
-  let hit = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) hit = !hit;
-  }
-  return hit;
-}
-
-/** Dans la forêt (contour extérieur) et hors de ses clairières (anneaux intérieurs). */
-function insideForest(lng: number, lat: number, f: Forest): boolean {
-  if (lng < f.bbox[0] || lng > f.bbox[2] || lat < f.bbox[1] || lat > f.bbox[3]) return false;
-  if (!insideRing(lng, lat, f.rings[0])) return false;
-  for (let i = 1; i < f.rings.length; i++) if (insideRing(lng, lat, f.rings[i])) return false;
-  return true;
-}
-
-/** Hexagone de rayon r (m) autour de (lng, lat). */
-function hexagon(lng: number, lat: number, r: number, mx: number): Ring {
-  const ring: Ring = [];
-  for (let a = 0; a < 6; a++) {
-    const t = (a / 6) * Math.PI * 2;
-    ring.push([lng + (Math.cos(t) * r) / mx, lat + (Math.sin(t) * r) / METERS_PER_DEG_LAT]);
-  }
-  ring.push(ring[0]);
-  return ring;
-}
-
-/**
- * Index des couloirs dégagés, par cases de 60 m : on ne teste que les tronçons
- * proches d'un arbre au lieu de toutes les pistes du domaine.
- */
-function clearingIndex(clearings: Clearing[], lng0: number, lat0: number, mx: number) {
-  const CELL = 60;
-  const cells = new Map<string, { ax: number; ay: number; bx: number; by: number; w: number }[]>();
-  const toXY = ([lng, lat]: number[]) => [(lng - lng0) * mx, (lat - lat0) * METERS_PER_DEG_LAT];
-  for (const c of clearings) {
-    for (let i = 1; i < c.coordinates.length; i++) {
-      const [ax, ay] = toXY(c.coordinates[i - 1]);
-      const [bx, by] = toXY(c.coordinates[i]);
-      const seg = { ax, ay, bx, by, w: c.halfWidth };
-      const pad = c.halfWidth;
-      for (let cx = Math.floor((Math.min(ax, bx) - pad) / CELL); cx <= Math.floor((Math.max(ax, bx) + pad) / CELL); cx++) {
-        for (let cy = Math.floor((Math.min(ay, by) - pad) / CELL); cy <= Math.floor((Math.max(ay, by) + pad) / CELL); cy++) {
-          const key = `${cx}|${cy}`;
-          const list = cells.get(key);
-          if (list) list.push(seg);
-          else cells.set(key, [seg]);
-        }
-      }
-    }
-  }
-  return (x: number, y: number): boolean => {
-    const list = cells.get(`${Math.floor(x / CELL)}|${Math.floor(y / CELL)}`);
-    if (!list) return false;
-    for (const s of list) {
-      const dx = s.bx - s.ax;
-      const dy = s.by - s.ay;
-      const len2 = dx * dx + dy * dy;
-      const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((x - s.ax) * dx + (y - s.ay) * dy) / len2));
-      if (Math.hypot(x - (s.ax + t * dx), y - (s.ay + t * dy)) < s.w) return true;
-    }
-    return false;
+function treesWorker(): Worker {
+  if (worker) return worker;
+  worker = new Worker(new URL('./forestTiles.worker.ts', import.meta.url), { type: 'module' });
+  worker.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>) => {
+    const p = pending.get(e.data.id);
+    if (!p) return;
+    pending.delete(e.data.id);
+    if (e.data.data) p.resolve(e.data.data);
+    else p.reject(new Error(e.data.error ?? 'Tuile de sapins indisponible'));
   };
+  worker.onerror = () => {
+    // Worker hors service : les tuiles en attente échouent, la carte reste utilisable sans sapins 3D.
+    for (const p of pending.values()) p.reject(new Error('Worker des sapins indisponible'));
+    pending.clear();
+  };
+  return worker;
+}
+
+let registered = false;
+
+function registerTreesProtocol() {
+  if (registered) return;
+  registered = true;
+  addProtocol('trees', (params, abort) => {
+    const m = /^trees:\/\/([^/]+)\/\d+\/(\d+)\/(\d+)\/(\d+)/.exec(params.url);
+    if (!m) return Promise.reject(new Error(`Tuile de sapins invalide : ${params.url}`));
+    const id = ++seq;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve: (data) => resolve({ data }), reject });
+      abort.signal.addEventListener(
+        'abort',
+        () => {
+          if (!pending.delete(id)) return;
+          treesWorker().postMessage({ type: 'cancel', id });
+          reject(new DOMException('Tuile abandonnée', 'AbortError'));
+        },
+        { once: true },
+      );
+      treesWorker().postMessage({ type: 'tile', id, set: m[1], z: Number(m[2]), x: Number(m[3]), y: Number(m[4]) });
+    });
+  });
+}
+
+// ---- Carte ----------------------------------------------------------------------
+
+/** Centre du cadre de la plus grande forêt (en surface de cadre), ou null sans forêt. */
+export function largestForestCenter(data: FeatureCollection | null | undefined): [number, number] | null {
+  let best: [number, number] | null = null;
+  let bestArea = 0;
+  for (const f of data?.features ?? []) {
+    if (f.geometry.type !== 'Polygon') continue;
+    const ring = f.geometry.coordinates[0];
+    const lngs = ring.map((p) => p[0]);
+    const lats = ring.map((p) => p[1]);
+    const [w, e, s, n] = [Math.min(...lngs), Math.max(...lngs), Math.min(...lats), Math.max(...lats)];
+    const area = (e - w) * (n - s);
+    if (area > bestArea) {
+      bestArea = area;
+      best = [(w + e) / 2, (s + n) / 2];
+    }
+  }
+  return best;
 }
 
 export interface ForestController {
   /** Pistes, remontées, routes : couloirs à laisser sans arbres. */
   setClearings(clearings: Clearing[]): void;
+  /**
+   * Part des sapins 3D dessinés (0 à 1), pour la qualité adaptative. À 0, plus de sapins 3D :
+   * le motif de sapins au sol reste affiché à tous les zooms.
+   */
+  setDensity(density: number): void;
   stop(): void;
 }
 
+let mapCounter = 0;
+
 /** Ajoute les sapins 3D des forêts `data` (polygones), sous `beforeId`. */
 export function addForestTrees(map: MlMap, data: FeatureCollection, visible: boolean, beforeId?: string): ForestController {
-  const forests: Forest[] = [];
-  for (const f of data.features) {
-    if (f.geometry.type !== 'Polygon') continue;
-    const rings = f.geometry.coordinates;
-    const lngs = rings[0].map((p) => p[0]);
-    const lats = rings[0].map((p) => p[1]);
-    forests.push({ rings, bbox: [Math.min(...lngs), Math.min(...lats), Math.max(...lngs), Math.max(...lats)] });
-  }
-  // Repère métrique fixe (centre des forêts) : la grille des arbres ne dépend pas de la vue.
-  const lng0 = forests.length ? (Math.min(...forests.map((f) => f.bbox[0])) + Math.max(...forests.map((f) => f.bbox[2]))) / 2 : 0;
-  const lat0 = forests.length ? (Math.min(...forests.map((f) => f.bbox[1])) + Math.max(...forests.map((f) => f.bbox[3]))) / 2 : 0;
-  const mx = metersPerDegLng(lat0);
-  let cleared: (x: number, y: number) => boolean = () => false;
+  registerTreesProtocol();
+  const set = `carte${++mapCounter}`;
+  let version = 0;
+  const tilesUrl = () => `trees://${set}/${version}/{z}/{x}/{y}`;
 
-  map.addSource(FOREST_3D_LAYER, { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, tolerance: 0 });
+  const polygons = data.features.flatMap((f) => (f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : []));
+  let [w, s, e, n] = [180, 90, -180, -90];
+  for (const rings of polygons) {
+    for (const [lng, lat] of rings[0]) {
+      w = Math.min(w, lng);
+      e = Math.max(e, lng);
+      s = Math.min(s, lat);
+      n = Math.max(n, lat);
+    }
+  }
+  treesWorker().postMessage({ type: 'forests', set, polygons });
+
+  map.addSource(FOREST_3D_LAYER, {
+    type: 'vector',
+    tiles: [tilesUrl()],
+    minzoom: TREES_MIN_TILE_ZOOM,
+    maxzoom: TREES_MAX_TILE_ZOOM,
+    // Aucune tuile demandée hors des forêts.
+    ...(polygons.length ? { bounds: [w, s, e, n] as [number, number, number, number] } : {}),
+  });
   map.addLayer(
     {
       id: FOREST_3D_LAYER,
       type: 'fill-extrusion',
       source: FOREST_3D_LAYER,
+      'source-layer': TREES_SOURCE_LAYER,
       minzoom: FOREST_MIN_ZOOM,
       layout: { visibility: visible ? 'visible' : 'none' },
       paint: {
@@ -155,111 +148,24 @@ export function addForestTrees(map: MlMap, data: FeatureCollection, visible: boo
     },
     beforeId,
   );
-  const source = map.getSource(FOREST_3D_LAYER) as GeoJSONSource;
-
-  let lastKey = '';
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const draw = () => {
-    timer = undefined;
-    const zoom = map.getZoom();
-    const shown = map.getLayer(FOREST_3D_LAYER) && map.getLayoutProperty(FOREST_3D_LAYER, 'visibility') !== 'none';
-    if (!shown || zoom < FOREST_MIN_ZOOM || !forests.length) {
-      if (lastKey) source.setData({ type: 'FeatureCollection', features: [] });
-      lastKey = '';
-      return;
-    }
-    const k = Math.min(MAX_SCALE, Math.max(1, 2 ** (REF_ZOOM - Math.round(zoom * 2) / 2)));
-    const kv = Math.sqrt(k);
-
-    // Zone plantée : la vue, limitée autour du centre (au loin, en vue inclinée, les arbres seraient invisibles).
-    const b = map.getBounds();
-    const c = map.getCenter();
-    const reach = 1600 * k;
-    const west = Math.max(b.getWest(), c.lng - reach / mx);
-    const east = Math.min(b.getEast(), c.lng + reach / mx);
-    const south = Math.max(b.getSouth(), c.lat - reach / METERS_PER_DEG_LAT);
-    const north = Math.min(b.getNorth(), c.lat + reach / METERS_PER_DEG_LAT);
-    let spacing = SPACING * k;
-    const area = (east - west) * mx * (north - south) * METERS_PER_DEG_LAT;
-    if (area / (spacing * spacing) > MAX_CELLS) spacing = Math.sqrt(area / MAX_CELLS);
-    // Grille alignée sur des valeurs rondes : même vue, mêmes arbres.
-    spacing = Math.ceil(spacing);
-
-    const i0 = Math.floor(((west - lng0) * mx) / spacing);
-    const i1 = Math.ceil(((east - lng0) * mx) / spacing);
-    const j0 = Math.floor(((south - lat0) * METERS_PER_DEG_LAT) / spacing);
-    const j1 = Math.ceil(((north - lat0) * METERS_PER_DEG_LAT) / spacing);
-    const key = `${spacing}|${i0}|${i1}|${j0}|${j1}`;
-    if (key === lastKey) return;
-    lastKey = key;
-
-    const near = forests.filter((f) => f.bbox[0] <= east && f.bbox[2] >= west && f.bbox[1] <= north && f.bbox[3] >= south);
-    const volumes: Volume[] = [];
-    let trees = 0;
-    // Du centre vers l'extérieur : si le plafond est atteint, ce sont les arbres lointains qui manquent.
-    const ci = Math.round(((c.lng - lng0) * mx) / spacing);
-    const cj = Math.round(((c.lat - lat0) * METERS_PER_DEG_LAT) / spacing);
-    const maxRing = Math.max(ci - i0, i1 - ci, cj - j0, j1 - cj);
-    const plant = (i: number, j: number) => {
-      if (i < i0 || i > i1 || j < j0 || j > j1) return;
-      const r1 = hash(i, j);
-      const r2 = hash(j + 7919, i - 104729);
-      const x = (i + 0.15 + 0.7 * r1) * spacing;
-      const y = (j + 0.15 + 0.7 * r2) * spacing;
-      const lng = lng0 + x / mx;
-      const lat = lat0 + y / METERS_PER_DEG_LAT;
-      if (!near.some((f) => insideForest(lng, lat, f))) return;
-      if (cleared(x, y)) return;
-      // Sapins de 9 à 16 m, plus ou moins larges.
-      const h = (9 + 7 * hash(i * 3 + 1, j * 5 + 2)) * kv;
-      const w = (0.85 + 0.3 * r1) * k;
-      const green = GREENS[Math.floor(r2 * GREENS.length)];
-      const vol = (r: number, base: number, top: number, color: string) =>
-        volumes.push({ type: 'Feature', properties: { c: color, b: base, h: top }, geometry: { type: 'Polygon', coordinates: [hexagon(lng, lat, r, mx)] } });
-      vol(0.35 * w, 0, 0.22 * h, TRUNK);
-      vol(2.6 * w, 0.15 * h, 0.5 * h, green);
-      vol(1.9 * w, 0.45 * h, 0.75 * h, green);
-      vol(1.1 * w, 0.7 * h, 0.94 * h, green);
-      vol(0.55 * w, 0.88 * h, h, SNOW_CAP);
-      trees++;
-    };
-    for (let ring = 0; ring <= maxRing && trees < MAX_TREES; ring++) {
-      if (ring === 0) {
-        plant(ci, cj);
-        continue;
-      }
-      for (let d = -ring; d <= ring && trees < MAX_TREES; d++) {
-        plant(ci + d, cj - ring);
-        plant(ci + d, cj + ring);
-        if (d !== -ring && d !== ring) {
-          plant(ci - ring, cj + d);
-          plant(ci + ring, cj + d);
-        }
-      }
-    }
-    source.setData({ type: 'FeatureCollection', features: volumes });
-  };
-
-  // Recalcul une fois la carte posée (pas à chaque image du déplacement).
-  const schedule = () => {
-    clearTimeout(timer);
-    timer = setTimeout(draw, REFRESH_MS);
-  };
-  map.on('moveend', schedule);
-  map.on('styledata', schedule);
-  schedule();
 
   return {
     setClearings(clearings) {
-      cleared = clearingIndex(clearings, lng0, lat0, mx);
-      lastKey = '';
-      schedule();
+      treesWorker().postMessage({ type: 'clearings', set, clearings });
+      // Nouvelle adresse : MapLibre oublie les tuiles déjà plantées et les redemande.
+      version++;
+      (map.getSource(FOREST_3D_LAYER) as VectorTileSource | undefined)?.setTiles([tilesUrl()]);
+    },
+    setDensity(density) {
+      if (!map.getLayer(FOREST_3D_LAYER)) return;
+      // Chaque arbre porte un rang r (0 à 0,95) : on garde ceux sous la densité voulue.
+      map.setFilter(FOREST_3D_LAYER, density >= 1 ? null : ['<', ['get', 'r'], density]);
+      if (map.getLayer(FOREST_PATTERN_LAYER)) {
+        map.setPaintProperty(FOREST_PATTERN_LAYER, 'fill-opacity', density > 0 ? FOREST_PATTERN_OPACITY : 0.95);
+      }
     },
     stop() {
-      clearTimeout(timer);
-      map.off('moveend', schedule);
-      map.off('styledata', schedule);
+      treesWorker().postMessage({ type: 'drop', set });
     },
   };
 }

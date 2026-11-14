@@ -130,7 +130,7 @@ export default function RouteCard({
     ) : null;
 
   return (
-    <div className="pointer-events-auto flex max-h-[48vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/60 bg-card/95 text-sm shadow-xl backdrop-blur-md sm:max-h-[70vh]">
+    <div className="pointer-events-auto flex max-h-[48vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/60 bg-card/95 text-sm shadow-xl sm:max-h-[70vh]">
       <div className="flex items-center justify-between border-b border-winter-100 px-4 py-3">
         <button type="button" onClick={() => setFolded((f) => !f)} aria-expanded={!folded} className="flex items-center gap-2 font-semibold text-foreground">
           <Navigation className="h-4 w-4 text-primary" /> Itinéraire à ski
@@ -291,7 +291,7 @@ export function NavigationBar({
   return (
     <>
       <div className={`pointer-events-none absolute inset-x-0 z-20 flex justify-center px-3 ${topClass}`}>
-        <div className="pointer-events-auto w-full max-w-md overflow-hidden rounded-2xl bg-winter-900/95 text-white shadow-2xl backdrop-blur-md">
+        <div className="pointer-events-auto w-full max-w-md overflow-hidden rounded-2xl bg-winter-900/95 text-white shadow-2xl">
           {!current ? (
             <p className="flex items-center gap-2 px-4 py-3 text-sm">
               <Loader2 className="h-4 w-4 animate-spin" /> En attente de votre position…
@@ -328,7 +328,7 @@ export function NavigationBar({
       </div>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
-        <div className="pointer-events-auto flex w-full max-w-md items-center gap-3 rounded-2xl border border-white/60 bg-card/95 px-4 py-3 shadow-xl backdrop-blur-md">
+        <div className="pointer-events-auto flex w-full max-w-md items-center gap-3 rounded-2xl border border-white/60 bg-card/95 px-4 py-3 shadow-xl">
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="truncate text-sm font-semibold text-foreground">{route?.target.name ?? 'Itinéraire'}</span>
