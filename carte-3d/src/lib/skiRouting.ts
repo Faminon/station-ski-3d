@@ -311,7 +311,20 @@ class Heap {
   }
 }
 
-function allowed(g: SkiGraph, e: Edge, level: SkiLevel): boolean {
+/**
+ * Pistes et remontées fermées (conditions en direct) : index dans `g.pistes` et `g.lifts`.
+ * L'itinéraire les contourne ; les passages à pied restent possibles.
+ */
+export interface ClosedLines {
+  pistes: Set<number>;
+  lifts: Set<number>;
+}
+
+function allowed(g: SkiGraph, e: Edge, level: SkiLevel, closed?: ClosedLines): boolean {
+  if (closed && e.line >= 0) {
+    if (e.kind === 'piste' && closed.pistes.has(e.line)) return false;
+    if (e.kind === 'lift' && closed.lifts.has(e.line)) return false;
+  }
   if (e.kind !== 'piste' || level === 'all') return true;
   const difficulty = g.pistes[e.line].detail;
   if (difficulty === 'black') return false;
@@ -321,13 +334,15 @@ function allowed(g: SkiGraph, e: Edge, level: SkiLevel): boolean {
 /**
  * Itinéraire le plus rapide d'un point vers la destination la plus proche (en
  * temps) parmi `targets`. `liftTargets` : viser plutôt la gare de départ de la
- * remontée la plus proche. Null si rien n'est accessible depuis ce point.
+ * remontée la plus proche (ouverte). `closed` : tracés fermés à éviter. Null si rien n'est
+ * accessible depuis ce point.
  */
 export function planRoute(
   g: SkiGraph,
   from: { lng: number; lat: number },
   targets: RouteTarget[] | 'lift',
   level: SkiLevel,
+  closed?: ClosedLines,
 ): RouteResult | null {
   const n = g.nodes.length;
   const best = new Float64Array(n).fill(Infinity);
@@ -351,7 +366,7 @@ export function planRoute(
     const [u, t] = heap.pop();
     if (t > best[u]) continue;
     for (const e of g.adj[u]) {
-      if (!allowed(g, e, level)) continue;
+      if (!allowed(g, e, level, closed)) continue;
       const nt = t + e.time;
       if (nt < best[e.to]) {
         best[e.to] = nt;
@@ -369,6 +384,7 @@ export function planRoute(
   let target: RouteTarget | null = null;
   if (targets === 'lift') {
     for (const { node, lift } of g.liftBottoms) {
+      if (closed?.lifts.has(lift)) continue;
       if (best[node] < goalTime) {
         goalTime = best[node];
         goal = node;

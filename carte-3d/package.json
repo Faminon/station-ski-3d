@@ -10,6 +10,8 @@
     "fetch:pois": "tsx scripts/fetchDomainPois.ts",
     "fetch:forests": "tsx scripts/fetchDomainForests.ts",
     "fetch:roads": "tsx scripts/fetchDomainRoads.ts",
+    "pack:build": "tsx scripts/buildOfflinePack.ts",
+    "pack:serve": "node scripts/servePack.mjs",
     "postinstall": "node scripts/copy-maplibre-worker.mjs",
     "predev": "node scripts/copy-maplibre-worker.mjs",
     "prebuild": "node scripts/copy-maplibre-worker.mjs"

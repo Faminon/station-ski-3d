@@ -1,0 +1,24 @@
+{
+  "source": "Noms de la carte interactive Lumiplan des stations (src/lib/live/lumiplan.ts) sans équivalent évident dans OpenStreetMap, rapprochés d'après le plan des pistes officiel. Les noms restés sans tracé sont listés par /api/live/foret-blanche (openings.unmatched).",
+  "pistes": {
+    "Plate de la Nonne": [
+      "Platte de la Nonne"
+    ],
+    "BABY ECRINS": [
+      "Baby"
+    ],
+    "CHEMIN DES ECUREUILS": [
+      "Ecureuils"
+    ],
+    "TETRAS": [
+      "Myrtilles"
+    ],
+    "STADE DE VITESSE": [
+      "KL"
+    ],
+    "Route des Florins": [
+      "Chemin des Florins"
+    ]
+  },
+  "lifts": {}
+}

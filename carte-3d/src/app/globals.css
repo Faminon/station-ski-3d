@@ -49,3 +49,39 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Bulles de la carte du domaine (MapPopup.tsx) : carte arrondie, ombre douce, pointe assortie. */
+.alti-popup .maplibregl-popup-content {
+  padding: 0;
+  border-radius: 20px;
+  background: var(--color-card);
+  box-shadow: 0 12px 32px rgb(28 46 64 / 0.22), 0 2px 6px rgb(28 46 64 / 0.12);
+  font-family: var(--font-sans);
+}
+.alti-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.alti-popup.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.alti-popup.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: var(--color-card);
+}
+.alti-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.alti-popup.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.alti-popup.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: var(--color-card);
+}
+.alti-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: var(--color-card);
+}
+.alti-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: var(--color-card);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .alti-popup .maplibregl-popup-content {
+    animation: alti-popup-in 160ms ease-out;
+  }
+}
+@keyframes alti-popup-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}

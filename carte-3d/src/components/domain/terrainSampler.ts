@@ -7,7 +7,8 @@
 // assez pour savoir de quel côté une piste descend, et une vingtaine de tuiles
 // suffisent pour tout le domaine.
 
-const TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+import { fetchTile } from '@/lib/offlinePack';
+
 const ZOOM = 12;
 const SIZE = 256;
 
@@ -25,9 +26,8 @@ export interface TerrainSampler {
 }
 
 async function loadTile(x: number, y: number): Promise<Uint8ClampedArray> {
-  const res = await fetch(TILE_URL.replace('{z}', String(ZOOM)).replace('{x}', String(x)).replace('{y}', String(y)));
-  if (!res.ok) throw new Error(`Tuile d'altitude ${x}/${y} : HTTP ${res.status}`);
-  const bitmap = await createImageBitmap(await res.blob());
+  // Paquet hors ligne ou serveur habituel (src/lib/offlinePack.ts).
+  const bitmap = await createImageBitmap(await fetchTile('dem', ZOOM, x, y));
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = SIZE;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;

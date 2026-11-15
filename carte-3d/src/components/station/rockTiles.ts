@@ -6,6 +6,7 @@
 // worker en panne), le calcul se replie sur le fil principal, comme avant.
 
 import { addProtocol } from 'maplibre-gl';
+import { offlinePack } from '@/lib/offlinePack';
 
 type Pending = { resolve: (bitmap: ImageBitmap) => void; reject: (e: Error) => void };
 const pending = new Map<number, Pending>();
@@ -18,6 +19,9 @@ function rockWorker(): Worker | null {
   if (worker) return worker;
   try {
     worker = new Worker(new URL('./rock.worker.ts', import.meta.url), { type: 'module' });
+    // Appli mobile : le worker lit lui aussi les tuiles du paquet hors ligne.
+    const pack = offlinePack();
+    if (pack) worker.postMessage({ type: 'pack', pack });
   } catch {
     workerBroken = true;
     return null;

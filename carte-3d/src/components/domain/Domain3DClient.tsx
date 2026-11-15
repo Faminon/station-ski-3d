@@ -21,7 +21,6 @@ const Domain3DViewer = dynamic(() => import('./Domain3DViewer'), {
 export default function Domain3DClient(props: {
   domain: SkiDomainConfig;
   stats: PisteStats | null;
-  stationIds: string[];
   villageIds: string[];
   builtAreas: BuiltArea[];
   embedded?: boolean;

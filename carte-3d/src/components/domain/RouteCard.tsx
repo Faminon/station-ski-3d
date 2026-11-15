@@ -87,6 +87,7 @@ export default function RouteCard({
   onLevel,
   status,
   result,
+  closedCount = 0,
   onStart,
   onSimulate,
   onClose,
@@ -104,6 +105,8 @@ export default function RouteCard({
   onLevel: (level: SkiLevel) => void;
   status: RouteStatus;
   result: RouteResult | null;
+  /** Pistes et remontées fermées que l'itinéraire contourne (conditions en direct). */
+  closedCount?: number;
   /** Lance le guidage GPS sur cet itinéraire. */
   onStart: () => void;
   /** Essai du guidage avec une position simulée qui parcourt l'itinéraire. */
@@ -226,13 +229,19 @@ export default function RouteCard({
         )}
         {status === 'none' && hasStart && goal && (
           <p className="rounded-xl bg-accent-50 px-3 py-2 text-xs text-foreground/70">
-            Aucun itinéraire à ski trouvé depuis ce point{level !== 'all' ? ' avec ce niveau de pistes' : ''}. Rapprochez le départ d&apos;une piste
+            Aucun itinéraire à ski trouvé depuis ce point{level !== 'all' ? ' avec ce niveau de pistes' : ''}
+            {closedCount > 0 ? ' en évitant les pistes et remontées fermées' : ''}. Rapprochez le départ d&apos;une piste
             {level !== 'all' ? ' ou élargissez le choix des pistes' : ''}.
           </p>
         )}
         {status === 'ready' && result && (
           <div>
             {summary}
+            {closedCount > 0 && (
+              <p className="mt-1.5 text-xs text-foreground/60">
+                Selon les ouvertures du jour : {closedCount} {closedCount > 1 ? 'pistes et remontées fermées évitées' : 'piste ou remontée fermée évitée'}.
+              </p>
+            )}
             <button
               type="button"
               onClick={onStart}

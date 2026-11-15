@@ -26,3 +26,6 @@ next-env.d.ts
 
 # Copié depuis node_modules (scripts/copy-maplibre-worker.mjs)
 /public/vendor/
+
+# Paquets hors ligne de l'appli mobile (scripts/buildOfflinePack.ts)
+/paquets/

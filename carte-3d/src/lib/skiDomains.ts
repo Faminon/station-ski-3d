@@ -58,6 +58,26 @@ export interface SkiDomainConfig {
   overviewBearing: number;
   /** Vallées et villages : repères sur la carte, liste du panneau, destinations d'itinéraire. */
   valleys: DomainValley[];
+  /** Conditions en direct (src/lib/live, /api/live/<slug>). Absent : la carte n'en affiche pas. */
+  live?: DomainLiveConfig;
+}
+
+/** Sources des conditions en direct d'un domaine. */
+export interface DomainLiveConfig {
+  /**
+   * Carte interactive Lumiplan des stations (ouvertures des pistes et remontées) : nom de la
+   * carte dans l'adresse lumiplay.link/interactive-map/<nom>. `resorts` : nom affiché par
+   * identifiant de station Lumiplan, et code de remontée dans OpenStreetMap (« R5 », « V9 »).
+   */
+  lumiplan?: { map: string; resorts: { id: string; name: string; liftCode?: string }[] };
+  /** Noms Lumiplan sans équivalent évident dans OpenStreetMap (fichier de public/data). */
+  aliasesUrl?: string;
+  /** Massif du bulletin avalanche de Météo-France (identifiant 1 à 74, nom affiché). */
+  avalancheMassif: { id: number; name: string };
+  /** Département de la vigilance : numéro Météo-France, nom, code NUTS 3 (MeteoAlarm). */
+  department: { code: string; name: string; nuts3: string };
+  /** Points des prévisions météo (bas et haut du domaine). */
+  weatherPoints: { name: string; lat: number; lng: number; altitude: number }[];
 }
 
 const TROIS_VALLEES_VALLEYS: DomainValley[] = [
@@ -149,6 +169,24 @@ export const SKI_DOMAINS: SkiDomainConfig[] = [
     center: [6.66, 44.6],
     overviewBearing: 180,
     valleys: FORET_BLANCHE_VALLEYS,
+    live: {
+      // Carte interactive des sites officiels de Vars et Risoul (sans contrat : voir src/lib/live/lumiplan.ts).
+      lumiplan: {
+        map: 'espace-foret-blanche',
+        resorts: [
+          { id: '750', name: 'Vars', liftCode: 'V' },
+          { id: '765', name: 'Risoul', liftCode: 'R' },
+        ],
+      },
+      aliasesUrl: '/data/foret-blanche-live-aliases.json',
+      avalancheMassif: { id: 20, name: 'Embrunais-Parpaillon' },
+      department: { code: '05', name: 'Hautes-Alpes', nuts3: 'FR822' },
+      weatherPoints: [
+        { name: 'Vars les Claux', lat: 44.5726, lng: 6.6816, altitude: 1850 },
+        { name: 'Risoul 1850', lat: 44.6229, lng: 6.6358, altitude: 1850 },
+        { name: 'Pic de Chabrières', lat: 44.5721, lng: 6.643, altitude: 2746 },
+      ],
+    },
   },
 ];
 

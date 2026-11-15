@@ -1,5 +1,5 @@
 {
- "source": "Plan des pistes officiel Vars-Risoul, saison 2026-2027 (Vars-Risoul-Fond2027BD.pdf)",
+ "source": "Plan des pistes officiel Vars-Risoul, saison 2026-2027 (Vars-Risoul-Fond2027BD.pdf) ; restaurants d’altitude : sites des offices de tourisme de Risoul et Vars (novembre 2026) ; contrôle des pistes : Plan des pistes officiel Vars-Risoul hiver 2024 (carte interactive Digisnow, vars.digisnow.app/map/1)",
  "rename": [
   {
    "osmId": 100152391,
@@ -217,5 +217,108 @@
     ]
    ]
   }
- ]
+ ],
+ "remove": [
+  {
+   "osmId": 1472150528,
+   "name": "L'entonnoir",
+   "why": "Itinéraire freeride non sécurisé (OSM : piste:difficulty=freeride, patrolled=no), absent du plan officiel et de la liste des pistes des stations"
+  },
+  {
+   "osmId": 1472150529,
+   "name": "La Banane",
+   "why": "Itinéraire freeride non sécurisé (OSM : piste:difficulty=freeride, patrolled=no), absent du plan officiel et de la liste des pistes des stations"
+  },
+  {
+   "osmId": 662864081,
+   "why": "Bout de chemin interdit au ski (OSM : ski=no)"
+  },
+  {
+   "osmId": 30116492,
+   "name": "Orée du Bois",
+   "why": "Absente de la liste officielle des pistes (Lumiplan 2026-2027) et du Plan des pistes officiel Vars-Risoul hiver 2024 (carte interactive Digisnow, vars.digisnow.app/map/1)"
+  },
+  {
+   "osmId": 30281668,
+   "name": "Medianes",
+   "why": "Absente de la liste officielle des pistes (Lumiplan 2026-2027) et du Plan des pistes officiel Vars-Risoul hiver 2024 (carte interactive Digisnow, vars.digisnow.app/map/1)"
+  },
+  {
+   "osmId": 30168291,
+   "name": "Route vers Col Valbelle",
+   "why": "Absente de la liste officielle des pistes (Lumiplan 2026-2027) et du Plan des pistes officiel Vars-Risoul hiver 2024 (carte interactive Digisnow, vars.digisnow.app/map/1)"
+  },
+  {
+   "osmId": 29121710,
+   "name": "Vallon Bleu",
+   "why": "Absente de la liste officielle des pistes (Lumiplan 2026-2027) et du Plan des pistes officiel Vars-Risoul hiver 2024 (carte interactive Digisnow, vars.digisnow.app/map/1)"
+  }
+ ],
+ "pois": {
+  "rename": [
+   {
+    "id": "way/56059696",
+    "name": "Les Balcons de Peynier",
+    "was": "Les Peyniers"
+   }
+  ],
+  "add": [
+   {
+    "id": "fix/le-pra-rond",
+    "name": "Le Pra Rond",
+    "category": "restaurant",
+    "kind": "Restaurant d’altitude",
+    "lat": 44.588945,
+    "lng": 6.637239,
+    "source": "https://www.risoul.com/restaurant-le-pra-rond-risoul.html"
+   },
+   {
+    "id": "fix/le-valbelle",
+    "name": "Le Valbelle",
+    "category": "restaurant",
+    "kind": "Restaurant d’altitude",
+    "lat": 44.590799,
+    "lng": 6.63258,
+    "source": "https://www.risoul.com/restaurant-le-valbelle-risoul.html"
+   },
+   {
+    "id": "fix/le-clos-fournier",
+    "name": "Le Clos Fournier",
+    "category": "restaurant",
+    "kind": "Restaurant d’altitude",
+    "lat": 44.618194,
+    "lng": 6.630101,
+    "source": "https://www.risoul.com/restaurant-le-clos-fournier-risoul.html"
+   },
+   {
+    "id": "fix/le-barjo",
+    "name": "Le Barjo",
+    "category": "restaurant",
+    "kind": "Restaurant d’altitude",
+    "lat": 44.565859,
+    "lng": 6.667886,
+    "website": "https://www.lebarjo.com",
+    "source": "https://provence-alpes-cotedazur.com/sejourner/restaurants/tous-les-restaurants/le-barjo-vars-fr-2901822/"
+   },
+   {
+    "id": "fix/le-chalheureux",
+    "name": "Le Chal’heureux",
+    "category": "restaurant",
+    "kind": "Hôtel-restaurant d’altitude",
+    "lat": 44.573136,
+    "lng": 6.665612,
+    "website": "https://www.chalheureux.com",
+    "source": "https://provence-alpes-cotedazur.com/sejourner/hebergements/tous-les-hebergements/hotels/le-chalheureux-vars-fr-4595277/"
+   },
+   {
+    "id": "node/242531769",
+    "name": "Poste de secours des pistes",
+    "category": "rescue",
+    "kind": "Poste de secours des pistes",
+    "lat": 44.57525,
+    "lng": 6.69971,
+    "source": "https://www.openstreetmap.org/node/242531769 (amenity=first_aid, en haut de Peynier ; écarté par l’ancienne extraction)"
+   }
+  ]
+ }
 }

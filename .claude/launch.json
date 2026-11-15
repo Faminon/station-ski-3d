@@ -4,14 +4,37 @@
     {
       "name": "carte-3d-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "carte-3d", "run", "dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "carte-3d",
+        "run",
+        "dev"
+      ],
       "port": 3001
     },
     {
       "name": "carte-3d-prod-3002",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["--prefix", "carte-3d", "next", "start", "carte-3d", "-p", "3002"],
+      "runtimeArgs": [
+        "--prefix",
+        "carte-3d",
+        "next",
+        "start",
+        "carte-3d",
+        "-p",
+        "3002"
+      ],
       "port": 3002
+    },
+    {
+      "name": "carte-3d-paquet-3010",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "carte-3d/scripts/servePack.mjs",
+        "foret-blanche",
+        "3010"
+      ],
+      "port": 3010
     }
   ]
 }

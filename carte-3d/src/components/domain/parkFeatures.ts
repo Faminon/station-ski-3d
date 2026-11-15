@@ -98,6 +98,63 @@ function slideBox(out: Volume[], f: Frame, at: XY, u: XY) {
 }
 
 /** Point et direction (unitaire, vers le bas) à la distance `d` d'une polyligne. */
+const ARCH_A = '#f08c00';
+const ARCH_B = '#1c7ed6';
+const BOARD = '#7048e8';
+const BOARD_STRIPE = '#f08c00';
+const BINDING = '#212529';
+const SHACK = '#343a40';
+const BENCHES = ['#e8590c', '#1c7ed6', '#2f9e44', '#f08c00'];
+
+/**
+ * Entrée du snowpark, en haut du parc : arche rayée orange et bleu enjambant la piste, snowboard
+ * géant planté debout à côté, cabane « DJ » et bancs colorés de la zone de détente.
+ * `p` : milieu du haut du parc ; `u` : sens de la descente. Hauteurs en unités S (voir box).
+ */
+function entrance(out: Volume[], f: Frame, p: XY, u: XY) {
+  const at = (d: number, side: number): XY => [p[0] + u[0] * d + u[1] * side, p[1] + u[1] * d - u[0] * side];
+  const span = 9;
+  // Arche : deux piliers rayés, poutre et banderole.
+  for (const side of [-span, span]) {
+    for (let i = 0; i < 4; i++) box(out, f, at(0, side), u, 0.7, 0.7, i * 1.1, (i + 1) * 1.1, i % 2 ? ARCH_B : ARCH_A);
+  }
+  box(out, f, at(0, 0), u, 0.7, span + 0.7, 4.4, 5.2, ARCH_B);
+  box(out, f, at(0, 0), u, 0.5, span - 1.5, 3.6, 4.4, '#ffffff');
+  for (const side of [-5, 0, 5]) box(out, f, at(0, side), u, 0.55, 1.2, 3.65, 4.35, ARCH_A);
+
+  // Snowboard géant à droite de l'arche ; zone de détente à gauche (cabane du DJ, bancs de couleur).
+  const board = at(1.5, span + 4.5);
+  // Pas sous une remontée : chaque élément de l'entrée est écarté s'il gênerait un pylône ou un câble.
+  const free = ([x, y]: XY, r: number) => !f.blocked(x, y) && !f.blocked(x + u[1] * r, y - u[0] * r) && !f.blocked(x - u[1] * r, y + u[0] * r);
+  if (free(board, 1.5)) boardSculpture(out, f, board, u);
+  const shack = at(3, -(span + 6));
+  if (free(shack, 3)) {
+    box(out, f, shack, u, 2.2, 2.6, 0, 2.2, SHACK);
+    box(out, f, shack, u, 2.6, 3, 2.2, 2.45, ARCH_A);
+    BENCHES.forEach((c, i) => {
+      const bench = at(7 + (i % 2) * 2.5, -(span + 3.5) - Math.floor(i / 2) * 3);
+      if (free(bench, 1.5)) box(out, f, bench, u, 0.5, 1.3, 0, 0.35, c);
+    });
+  }
+}
+
+/** Snowboard géant planté debout dans la neige, face à la pente : spatule et talon arrondis. */
+function boardSculpture(out: Volume[], f: Frame, board: XY, u: XY) {
+  const slices = 12;
+  const height = 6.2;
+  for (let i = 0; i < slices; i++) {
+    const z1 = (height * i) / slices;
+    const z2 = (height * (i + 1)) / slices;
+    const t = (i + 0.5) / slices;
+    // Largeur pleine au milieu, arrondie aux deux bouts (spatule et talon).
+    const edge = Math.min(t, 1 - t) / 0.12;
+    const half = 1.05 * Math.sqrt(Math.min(1, edge));
+    const stripe = t > 0.45 && t < 0.55;
+    box(out, f, board, u, 0.16, half, z1, z2, stripe ? BOARD_STRIPE : BOARD);
+  }
+  for (const z of [2.1, 3.9]) box(out, f, board, u, 0.38, 0.75, z, z + 0.3, BINDING);
+}
+
 function along(line: XY[], cum: number[], d: number): { p: XY; u: XY } {
   let i = 1;
   while (i < cum.length - 1 && cum[i] < d) i++;
@@ -134,6 +191,10 @@ function layoutRun(out: Volume[], f: Frame, line: XY[], width: number) {
   const cum = [0];
   for (let i = 1; i < line.length; i++) cum.push(cum[i - 1] + Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]));
   const length = cum[cum.length - 1];
+  if (length > 60) {
+    const top = along(line, cum, 3);
+    if (!f.blocked(top.p[0], top.p[1])) entrance(out, f, top.p, top.u);
+  }
   for (let d = 12, row = 0; d < length - 20; d += rowStep(row), row++) {
     const { p, u } = along(line, cum, d);
     placeRow(out, f, p, u, width, row);
@@ -149,6 +210,18 @@ function layoutArea(out: Volume[], f: Frame, ring: XY[], u: XY) {
   const ts = ring.map(([x, y]) => x * u[0] + y * u[1]);
   const ss = ring.map(([x, y]) => x * u[1] - y * u[0]);
   const [tMin, tMax] = [Math.min(...ts), Math.max(...ts)];
+  // Entrée : au milieu de la largeur, quelques mètres sous le haut du parc.
+  const top = tMin + 4;
+  const topCuts: number[] = [];
+  for (let i = 0; i < ring.length; i++) {
+    const j = (i + 1) % ring.length;
+    if (ts[i] <= top !== ts[j] <= top) topCuts.push(ss[i] + ((top - ts[i]) / (ts[j] - ts[i])) * (ss[j] - ss[i]));
+  }
+  if (topCuts.length >= 2 && tMax - tMin > 60) {
+    const sm = (Math.min(...topCuts) + Math.max(...topCuts)) / 2;
+    const p: XY = [u[0] * top + u[1] * sm, u[1] * top - u[0] * sm];
+    if (!f.blocked(p[0], p[1])) entrance(out, f, p, u);
+  }
   for (let t = tMin + 12, row = 0; t < tMax - 20; t += rowStep(row), row++) {
     // Coupe du contour à cette hauteur : bords gauche et droit du parc.
     const cuts: number[] = [];

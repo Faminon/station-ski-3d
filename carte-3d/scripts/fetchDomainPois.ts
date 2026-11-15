@@ -88,7 +88,7 @@ async function main() {
   // poubelles…) surcharge Overpass, qui abandonne la requête.
   const elements = await overpass(`[out:json][timeout:180][bbox:${bbox}];
 (
-  nwr["amenity"~"^(restaurant|fast_food|cafe|ice_cream|bar|pub|nightclub|pharmacy|doctors|clinic|hospital|dentist|bank|atm|post_office|police|townhall|toilets|drinking_water|library|childcare|laundry|parking|bus_station|taxi|fuel|charging_station|cinema|theatre|casino|spa|ski_school)$"];
+  nwr["amenity"~"^(restaurant|fast_food|cafe|ice_cream|bar|pub|nightclub|pharmacy|doctors|clinic|hospital|dentist|bank|atm|post_office|police|townhall|toilets|drinking_water|library|childcare|laundry|parking|bus_station|taxi|fuel|charging_station|cinema|theatre|casino|spa|ski_school|first_aid)$"];
   nwr["shop"];
   nwr["tourism"~"^(hotel|apartment|chalet|guest_house|hostel|alpine_hut|wilderness_hut|information|viewpoint|picnic_site|attraction|museum)$"];
   nwr["leisure"~"^(sports_centre|swimming_pool|ice_rink|fitness_centre|spa|water_park|bowling_alley|picnic_table)$"];

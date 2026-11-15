@@ -1,17 +1,26 @@
 // Worker des barres rocheuses : calcule les tuiles « rock:// » hors du fil
 // principal (voir rockCompute.ts).
 //
-// Messages reçus : { type: 'tile', id, z, x, y } et { type: 'cancel', id }.
+// Messages reçus : { type: 'tile', id, z, x, y }, { type: 'cancel', id } et, dans
+// l'appli mobile, { type: 'pack', pack } (tuiles du paquet hors ligne, src/lib/offlinePack.ts).
 // Réponse : { id, bitmap } (ImageBitmap transférée) ou { id, error }.
 
+import { setOfflinePack, type OfflinePack } from '@/lib/offlinePack';
 import { rockTile } from './rockCompute';
 
-type Msg = { type: 'tile'; id: number; z: number; x: number; y: number } | { type: 'cancel'; id: number };
+type Msg =
+  | { type: 'tile'; id: number; z: number; x: number; y: number }
+  | { type: 'cancel'; id: number }
+  | { type: 'pack'; pack: OfflinePack };
 
 const running = new Map<number, AbortController>();
 
 self.onmessage = async (e: MessageEvent<Msg>) => {
   const msg = e.data;
+  if (msg.type === 'pack') {
+    setOfflinePack(msg.pack);
+    return;
+  }
   if (msg.type === 'cancel') {
     running.get(msg.id)?.abort();
     return;

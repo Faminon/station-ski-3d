@@ -1,9 +1,10 @@
 // Socle commun des cartes 3D (vue d'une station, carte des 3 Vallées) : fonds,
 // relief, conversion du plan des pistes. Réservé au navigateur (MapLibre, WebGL).
 
-import { getVersion, setWorkerUrl, type ExpressionSpecification, type Map as MlMap, type StyleSpecification } from 'maplibre-gl';
+import { addProtocol, getVersion, setWorkerUrl, type ExpressionSpecification, type Map as MlMap, type StyleSpecification } from 'maplibre-gl';
 import type { StationPisteMap } from '@/lib/apis/overpass';
-import { IGN_ATTRIBUTION, IGN_MAX_ZOOM, IGN_ORTHO_URL, IGN_PLAN_URL } from '@/lib/ignTiles';
+import { IGN_ATTRIBUTION, IGN_MAX_ZOOM } from '@/lib/ignTiles';
+import { REMOTE_TILES, fetchTile, offlinePack, tileMaxZoom, type TileSet } from '@/lib/offlinePack';
 import { isSkierLift } from '@/lib/pisteStats';
 import { registerRockProtocol } from './rockTiles';
 
@@ -12,6 +13,17 @@ import { registerRockProtocol } from './rockTiles';
 setWorkerUrl(`/vendor/maplibre-gl-worker.mjs?v=${getVersion()}`);
 // Barres rocheuses calculées dans le navigateur (pente + photo aérienne) : voir rockTiles.ts.
 registerRockProtocol();
+
+// Appli mobile avec le paquet hors ligne : fonds et relief lus dans le paquet (voir src/lib/offlinePack.ts).
+if (offlinePack()) {
+  addProtocol('paquet', async (params, abortController) => {
+    const [set, z, x, y] = params.url.replace('paquet://', '').split('/');
+    const blob = await fetchTile(set as TileSet, Number(z), Number(x), Number(y), abortController.signal);
+    return { data: await blob.arrayBuffer() };
+  });
+}
+/** Adresses des tuiles d'un jeu : le paquet s'il y en a un, sinon le serveur habituel. */
+const tilesOf = (set: TileSet) => [offlinePack() ? `paquet://${set}/{z}/{x}/{y}` : REMOTE_TILES[set]];
 
 export const METERS_PER_DEG_LAT = 110_574;
 export const metersPerDegLng = (lat: number) => 111_320 * Math.cos((lat * Math.PI) / 180);
@@ -99,7 +111,8 @@ export function addForests(map: MlMap, data: GeoJSON.FeatureCollection, visible:
   );
 }
 
-const DEM_TILES = ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'];
+const DEM_TILES = tilesOf('dem');
+const DEM_MAX_ZOOM = tileMaxZoom('dem', 15);
 
 /** Image satellite ou carte topographique drapée sur le relief réel (Terrain Tiles). */
 export const TERRAIN_STYLE: StyleSpecification = {
@@ -112,17 +125,17 @@ export const TERRAIN_STYLE: StyleSpecification = {
     satellite: {
       type: 'raster',
       // Photographies aériennes de l'IGN (voir src/lib/ignTiles.ts).
-      tiles: [IGN_ORTHO_URL],
+      tiles: tilesOf('ortho'),
       tileSize: 256,
-      maxzoom: IGN_MAX_ZOOM,
+      maxzoom: tileMaxZoom('ortho', IGN_MAX_ZOOM),
       attribution: IGN_ATTRIBUTION,
     },
     topo: {
       type: 'raster',
       // Plan IGN.
-      tiles: [IGN_PLAN_URL],
+      tiles: tilesOf('plan'),
       tileSize: 256,
-      maxzoom: IGN_MAX_ZOOM,
+      maxzoom: tileMaxZoom('plan', IGN_MAX_ZOOM),
       attribution: IGN_ATTRIBUTION,
     },
     // Altitudes : Terrain Tiles (Mapzen / AWS Open Data), format « terrarium ».
@@ -130,13 +143,13 @@ export const TERRAIN_STYLE: StyleSpecification = {
       type: 'raster-dem',
       tiles: DEM_TILES,
       tileSize: 256,
-      maxzoom: 15,
+      maxzoom: DEM_MAX_ZOOM,
       encoding: 'terrarium',
       attribution: 'Relief : Terrain Tiles (Mapzen, AWS Open Data — SRTM, EU-DEM/Copernicus)',
     },
     // Mêmes altitudes pour la neige et l'ombrage : MapLibre recommande une source
     // distincte de celle du relief 3D, pour un rendu plus net.
-    'dem-snow': { type: 'raster-dem', tiles: DEM_TILES, tileSize: 256, maxzoom: 15, encoding: 'terrarium' },
+    'dem-snow': { type: 'raster-dem', tiles: DEM_TILES, tileSize: 256, maxzoom: DEM_MAX_ZOOM, encoding: 'terrarium' },
     // Roche à nu sur les pentes trop raides pour garder la neige (rockTiles.ts).
     rock: { type: 'raster', tiles: ['rock://{z}/{x}/{y}'], tileSize: 256, minzoom: 10, maxzoom: 17 },
   },
@@ -200,9 +213,11 @@ export function pisteGeoJson(map: StationPisteMap) {
   return {
     pistes: {
       type: 'FeatureCollection' as const,
-      features: map.pistes.map((p) => ({
+      // `id` : rang du tracé (état « feature-state » de MapLibre) ; `osmId` : identifiant OpenStreetMap.
+      features: map.pistes.map((p, i) => ({
         type: 'Feature' as const,
-        properties: { difficulty: p.difficulty, name: p.name ?? '' },
+        id: i,
+        properties: { difficulty: p.difficulty, name: p.name ?? '', osmId: p.id, length: Math.round(p.length) },
         geometry: { type: 'LineString' as const, coordinates: p.points.map(toLngLat) },
       })),
     },
@@ -210,9 +225,10 @@ export function pisteGeoJson(map: StationPisteMap) {
       type: 'FeatureCollection' as const,
       features: map.lifts
         .filter((l) => isSkierLift(l.liftType))
-        .map((l) => ({
+        .map((l, i) => ({
           type: 'Feature' as const,
-          properties: { name: l.name ?? '', liftType: l.liftType, length: Math.round(l.length) },
+          id: i,
+          properties: { name: l.name ?? '', liftType: l.liftType, length: Math.round(l.length), osmId: l.id },
           geometry: { type: 'LineString' as const, coordinates: l.points.map(toLngLat) },
         })),
     },

@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Copié depuis node_modules (scripts/copy-maplibre-worker.mjs).
     "public/vendor/**",
+    // Paquets hors ligne fabriqués par scripts/buildOfflinePack.ts.
+    "paquets/**",
   ]),
 ]);
 

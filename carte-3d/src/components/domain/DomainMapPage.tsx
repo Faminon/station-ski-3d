@@ -24,7 +24,6 @@ export default function DomainMapPage({ slug, embedded = false }: { slug: string
     <Domain3DClient
       domain={domain}
       stats={data.stats}
-      stationIds={data.stations.map((s) => s.id)}
       villageIds={data.stations.filter((s) => s.village).map((s) => s.id)}
       // Villages dont les bâtiments réels sont fournis : leurs lieux n'ont pas besoin de bâtiment dessiné.
       builtAreas={data.builtAreas}

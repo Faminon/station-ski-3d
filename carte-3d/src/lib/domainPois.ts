@@ -132,6 +132,8 @@ export function classifyDomainPoi(tags: Tags): { category: DomainPoiCategoryId; 
   if (tags.amenity === 'toilets') return { category: 'toilets', kind: 'Toilettes' };
   if (tags.amenity === 'drinking_water') return { category: 'toilets', kind: "Point d'eau potable" };
   if (tags.emergency && EMERGENCY_KINDS[tags.emergency]) return { category: 'rescue', kind: EMERGENCY_KINDS[tags.emergency] };
+  // Poste de premiers secours (souvent celui des pisteurs, en haut d'une remontée).
+  if (tags.amenity === 'first_aid') return { category: 'rescue', kind: 'Poste de secours des pistes' };
   if (tags.tourism === 'information') {
     return tags.information === 'office' ? { category: 'info', kind: 'Office de tourisme' } : null;
   }

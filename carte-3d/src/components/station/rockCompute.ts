@@ -7,9 +7,8 @@
 // Calcul exécuté dans rock.worker.ts (repli sur le fil principal si les workers
 // manquent) : rien ici ne touche au DOM.
 
-import { IGN_ORTHO_URL } from '@/lib/ignTiles';
+import { fetchTile, type TileSet } from '@/lib/offlinePack';
 
-const DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 /** Zoom des altitudes : environ 7 m par pixel dans les Alpes, assez pour dessiner les barres rocheuses. */
 const DEM_ZOOM = 14;
 const SIZE = 256;
@@ -33,10 +32,9 @@ interface DemTile {
   alt: Float32Array;
 }
 
-async function decode(url: string, signal: AbortSignal): Promise<ImageData> {
-  const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const bitmap = await createImageBitmap(await res.blob());
+/** Tuile décodée en pixels (paquet hors ligne ou serveur habituel, voir src/lib/offlinePack.ts). */
+async function decode(set: TileSet, z: number, x: number, y: number, signal: AbortSignal): Promise<ImageData> {
+  const bitmap = await createImageBitmap(await fetchTile(set, z, x, y, signal));
   const canvas = new OffscreenCanvas(SIZE, SIZE);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(bitmap, 0, 0, SIZE, SIZE);
@@ -47,16 +45,16 @@ async function decode(url: string, signal: AbortSignal): Promise<ImageData> {
 /** Tuiles d'altitude déjà décodées (une tuile sert à 4, 16 ou 64 tuiles de roche plus fines). */
 const demCache = new Map<string, Promise<DemTile>>();
 
-function demTile(x: number, y: number): Promise<DemTile> {
-  const key = `${x}/${y}`;
+function demTile(zoom: number, x: number, y: number): Promise<DemTile> {
+  const key = `${zoom}/${x}/${y}`;
   const cached = demCache.get(key);
   if (cached) return cached;
   // Sans signal d'annulation : la tuile d'altitude est partagée entre plusieurs tuiles de roche.
-  const promise = decode(DEM_URL.replace('{z}', String(DEM_ZOOM)).replace('{x}', String(x)).replace('{y}', String(y)), new AbortController().signal).then((img) => {
+  const promise = decode('dem', zoom, x, y, new AbortController().signal).then((img) => {
     const alt = new Float32Array(SIZE * SIZE);
     for (let i = 0; i < SIZE * SIZE; i++) alt[i] = img.data[i * 4] * 256 + img.data[i * 4 + 1] + img.data[i * 4 + 2] / 256 - 32768;
     // Taille d'un pixel au sol, à la latitude de la tuile.
-    const n = 2 ** DEM_ZOOM;
+    const n = 2 ** zoom;
     const lat = Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n)));
     const cell = (EARTH_CIRCUMFERENCE * Math.cos(lat)) / (SIZE * n);
     const at = (px: number, py: number) => alt[Math.min(SIZE - 1, Math.max(0, py)) * SIZE + Math.min(SIZE - 1, Math.max(0, px))];
@@ -84,7 +82,8 @@ export async function rockTile(z: number, x: number, y: number, signal: AbortSig
   // Altitudes : tuile parente au zoom DEM_ZOOM (ou plus grossière si on est plus loin).
   const dz = Math.min(z, DEM_ZOOM);
   const scale = 2 ** (z - dz);
-  const dem = await demTile(Math.floor(x / scale), Math.floor(y / scale));
+  // Zoom dz et non DEM_ZOOM : sous le zoom 14, les coordonnées x, y / scale sont celles du zoom dz.
+  const dem = await demTile(dz, Math.floor(x / scale), Math.floor(y / scale));
   const ox = (x % scale) * (SIZE / scale);
   const oy = (y % scale) * (SIZE / scale);
 
@@ -111,7 +110,7 @@ export async function rockTile(z: number, x: number, y: number, signal: AbortSig
   if (!any) return createImageBitmap(out);
 
   // Photo absente (tuile manquante côté IGN, hors couverture) : roche grise uniforme, légèrement grenue.
-  const photo = await decode(IGN_ORTHO_URL.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y)), signal).catch((err) => {
+  const photo = await decode('ortho', z, x, y, signal).catch((err) => {
     if (signal.aborted) throw err;
     const img = new ImageData(SIZE, SIZE);
     for (let i = 0; i < SIZE * SIZE; i++) {

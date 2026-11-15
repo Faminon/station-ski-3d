@@ -1,19 +1,20 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FullscreenControl, GeolocateControl, LngLatBounds, Map as MlMap, Marker, NavigationControl, Popup, ScaleControl, type FilterSpecification, type GeoJSONSource, type MapMouseEvent } from 'maplibre-gl';
+import { FullscreenControl, GeolocateControl, LngLatBounds, Map as MlMap, Marker, NavigationControl, Popup, ScaleControl, type ExpressionSpecification, type FilterSpecification, type GeoJSONSource, type MapMouseEvent } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { ArrowLeft, Box, Cable, Check, ExternalLink, Layers, Loader2, LocateFixed, Map as MapIcon, Maximize2, Navigation, RotateCw, Search, Share2, X } from 'lucide-react';
+import { ArrowLeft, Box, Cable, Check, ExternalLink, FlaskConical, Layers, Loader2, LocateFixed, Map as MapIcon, Maximize2, MousePointer2, Navigation, RotateCw, Search, Share2, Snowflake, X } from 'lucide-react';
 import { DIFFICULTY_LABELS, PISTE_COLORS, type PisteDifficulty, type StationPisteMap } from '@/lib/apis/overpass';
 import type { PisteStats } from '@/lib/pisteStats';
-import { applyCorrections, type DomainCorrections } from '@/lib/domainCorrections';
+import { applyCorrections, applyPoiCorrections, type DomainCorrections } from '@/lib/domainCorrections';
 import { DOMAIN_POI_CATEGORIES, type DomainPoi, type DomainPoiCategoryId, type DomainPois } from '@/lib/domainPois';
-import { DIFFICULTY_SINGULAR, LIFT_LABELS, type DomainValley, type DomainVillage, type SkiDomainConfig } from '@/lib/skiDomains';
+import { DIFFICULTY_SINGULAR, LIFT_LABELS, type DomainVillage, type SkiDomainConfig } from '@/lib/skiDomains';
 import { SEARCH_SITE_URL } from '@/lib/searchSite';
 import type { Village3d } from '@/lib/village3d';
 import RouteCard, { NavigationBar, ROUTE_LIFT_COLOR, ROUTE_WALK_COLOR, type RouteGoal, type RouteStatus } from './RouteCard';
 import { loadTerrain } from './terrainSampler';
-import { buildSkiGraph, planRoute, trimRoute, type RouteResult, type RouteTarget, type SkiGraph, type SkiLevel } from '@/lib/skiRouting';
+import { siteOrigin } from '@/lib/offlinePack';
+import { buildSkiGraph, lineLength, planRoute, trimRoute, type ClosedLines, type RouteResult, type RouteTarget, type SkiGraph, type SkiLevel } from '@/lib/skiRouting';
 import { PARK_COLORS, parkZoneFeatures } from './parkZones';
 import { formatDistance, nearestLine, nearestPoint, type NamedLine, type Nearest } from './nearby';
 import { PARK_FEATURES_LAYER, addParkFeatures } from './parkFeatures';
@@ -22,9 +23,14 @@ import { installPerfProbe } from './perfProbe';
 import { installAdaptiveQuality } from './adaptiveQuality';
 import { installFrameLimiter } from './frameLimiter';
 import { tuneMapPerformance } from './mapPerformance';
-import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, type BuiltArea } from './mountainBuildings';
+import LivePanel, { AvalancheRiskIcon, LIVE_CLOSED_OPACITY, RISK_LABELS } from './LivePanel';
+import { POI_ICONS, SEARCH_ICONS } from './panelIcons';
+import { useLiveConditions } from './useLiveConditions';
+import type { LiveConditions, LiveItemState } from '@/lib/live/types';
+import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, placeClearings, type BuiltArea } from './mountainBuildings';
 import { LIFT_3D_LAYERS, addLifts3d, type LiftsController } from '@/components/station/liftAnimation';
-import { type Base, addForests, applyWinter, TERRAIN_EXAGGERATION, TERRAIN_STYLE, facadeColor, pisteGeoJson, placePopupContent, supportsWebGL } from '@/components/station/map3d';
+import { type Base, addForests, applyWinter, TERRAIN_EXAGGERATION, TERRAIN_STYLE, facadeColor, pisteGeoJson, supportsWebGL } from '@/components/station/map3d';
+import { PlaceCard, TrackCard, openReactPopup } from './MapPopup';
 
 /**
  * Carte 3D d'un domaine skiable relié, en plein écran : relief réel, toutes les
@@ -102,6 +108,36 @@ const IS_DRAG: FilterSpecification = ['in', ['get', 'liftType'], ['literal', DRA
 const NOT_DRAG: FilterSpecification = ['!', IS_DRAG];
 
 /** Motif d'une perche de téléski : tige perpendiculaire au câble, terminée par l'assiette. */
+/** Croix rouge cerclée de blanc posée sur une piste fermée. */
+function closedCrossIcon(): ImageData {
+  const size = 40;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(20, 20, 17, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e03131';
+  ctx.beginPath();
+  ctx.arc(20, 20, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 4.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(13.5, 13.5);
+  ctx.lineTo(26.5, 26.5);
+  ctx.moveTo(26.5, 13.5);
+  ctx.lineTo(13.5, 26.5);
+  ctx.stroke();
+  return ctx.getImageData(0, 0, size, size);
+}
+
+/** Tronçons trop courts pour porter une croix (liaisons, bouts de piste découpés par OSM). */
+const CLOSED_CROSS_MIN_LENGTH = 150;
+const LONG_ENOUGH: ExpressionSpecification = ['>=', ['get', 'length'], CLOSED_CROSS_MIN_LENGTH];
+
 function dragTickIcon(): ImageData {
   const size = 24;
   const canvas = document.createElement('canvas');
@@ -132,6 +168,9 @@ const SEARCH_KINDS: { id: SearchKind; label: string; emoji: string }[] = [
   { id: 'hut', label: 'Refuges', emoji: '🛖' },
   { id: 'village', label: 'Stations', emoji: '🏔️' },
 ];
+
+/** Types de recherche qui sont des lieux : la carte n'affiche alors que ceux-là. */
+const SEARCH_KIND_POIS: Partial<Record<SearchKind, DomainPoiCategoryId>> = { restaurant: 'restaurant', hut: 'hut', toilets: 'toilets' };
 
 /** Un résultat de recherche : lieu, remontée, piste ou station. */
 interface SearchEntry {
@@ -229,6 +268,22 @@ interface Hover {
   color: string;
   title: string;
   detail: string;
+  /** État en direct (« Ouverte · Damée »), et s'il est ouvert. */
+  live?: { text: string; open: boolean };
+}
+
+// ---- État en direct des tracés ------------------------------------------------------------
+// Chaque piste et remontée porte un « feature-state » `live` ('open', 'closed', 'out', ou rien
+// sans donnée) : les styles en tiennent compte sans recharger les tracés ni ajouter de calque.
+const LIVE_STATE: ExpressionSpecification = ['to-string', ['feature-state', 'live']];
+const LIVE_SHUT: ExpressionSpecification = ['match', LIVE_STATE, ['closed', 'out'], true, false];
+/** Valeur `shut` pour un tracé fermé ou hors saison, `normal` sinon. */
+const whenShut = (shut: number, normal: number): ExpressionSpecification => ['case', LIVE_SHUT, shut, normal];
+
+function liveText(state: LiveItemState | undefined): Hover['live'] {
+  if (!state) return undefined;
+  const parts = [state.label, state.grooming, state.hours, state.message].filter(Boolean);
+  return { text: parts.join(' · '), open: state.status === 'open' };
 }
 
 /** Étiquette d'un village : bouton qui amène la vue sur lui (texte posé en textContent). */
@@ -342,10 +397,25 @@ const BOOT_STEPS = [
 ] as const;
 type BootStep = (typeof BOOT_STEPS)[number]['id'];
 
+/** Onglets du panneau (quand le domaine a des conditions en direct). */
+type PanelTab = 'explore' | 'conditions';
+const PANEL_TABS: [PanelTab, string][] = [
+  ['explore', 'Explorer'],
+  ['conditions', 'Conditions'],
+];
+
+/** Interrupteur visuel d'une ligne à bascule (le bouton porte role="switch"). */
+function SwitchKnob({ on }: { on: boolean }) {
+  return (
+    <span className={`relative h-6 w-10 shrink-0 rounded-full transition-colors duration-200 ${on ? 'bg-primary' : 'bg-winter-200'}`} aria-hidden>
+      <span className={`absolute left-0 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ${on ? 'translate-x-5' : 'translate-x-1'}`} />
+    </span>
+  );
+}
+
 export default function Domain3DViewer({
   domain,
   stats,
-  stationIds,
   villageIds,
   builtAreas,
   embedded = false,
@@ -353,8 +423,6 @@ export default function Domain3DViewer({
   /** Domaine affiché : nom, villages, fichiers de données, vue de départ. */
   domain: SkiDomainConfig;
   stats: PisteStats | null;
-  /** Stations du domaine présentes sur AltiStay (liens vers leur fiche). */
-  stationIds: string[];
   /** Stations dont les bâtiments du village sont fournis (public/data/villages/<id>.json). */
   villageIds: string[];
   /** Villages dont les bâtiments réels sont chargés : pas de chalet dessiné pour leurs restaurants. */
@@ -391,7 +459,9 @@ export default function Domain3DViewer({
   /** Message bref en bas de l'écran (lien copié, localisation refusée…). */
   const [notice, setNotice] = useState<string | null>(null);
   const geolocateRef = useRef<GeolocateControl | null>(null);
-  const goToRef = useRef<((poi: DomainPoi) => void) | null>(null);
+  const goToRef = useRef<((goal: RouteGoal) => void) | null>(null);
+  /** Bulle d'une piste ou d'une remontée cliquée (créée dans l'effet de la carte, lit l'état à jour). */
+  const openTrackRef = useRef<((f: { layer: 'pistes' | 'lifts'; properties: Record<string, unknown> }, at: [number, number]) => void) | null>(null);
   // Itinéraire à ski.
   const [routeOpen, setRouteOpen] = useState(false);
   const [routeGoal, setRouteGoal] = useState<RouteGoal | null>(null);
@@ -423,11 +493,30 @@ export default function Domain3DViewer({
   // efface ce paramètre quand une carte est détruite (remontage du composant en développement).
   const [sharedView] = useState(() => parseSharedView(window.location.hash));
   const linesRef = useRef<{ pistes: NamedLine[]; lifts: NamedLine[] }>({ pistes: [], lifts: [] });
+  // Conditions en direct (src/lib/live) : lues par le survol, posées sur les tracés par setFeatureState.
+  // Jour de pleine saison simulé : ?demo=saison dans l'adresse, ou le bouton de l'onglet Conditions.
+  const [demo, setDemo] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('demo') === 'saison');
+  const live = useLiveConditions(domain.slug, !!domain.live && webglOk, demo);
+  const toggleDemo = () => {
+    const next = !demo;
+    setDemo(next);
+    // Gardé dans l'adresse (lien partageable, rechargement), sans toucher à la vue (#vue=…).
+    const url = new URL(window.location.href);
+    if (next) url.searchParams.set('demo', 'saison');
+    else url.searchParams.delete('demo');
+    window.history.replaceState(window.history.state, '', url);
+  };
+  const liveRef = useRef<LiveConditions | null>(null);
+  const liveIdsRef = useRef<{ pistes: Map<string, string | number | undefined>; lifts: Map<string, string | number | undefined> } | null>(null);
+  /** Dernier état posé par tracé (« pistes|12 » → 'open') : seuls les changements sont envoyés à MapLibre. */
+  const liveAppliedRef = useRef(new Map<string, string>());
   const [pois, setPois] = useState<DomainPoi[]>([]);
   const [enabledPois, setEnabledPois] = useState<Set<DomainPoiCategoryId>>(
     () => new Set(DOMAIN_POI_CATEGORIES.filter((c) => c.defaultOn).map((c) => c.id)),
   );
   const [query, setQuery] = useState('');
+  /** Onglet du panneau : exploration de la carte ou conditions en direct. */
+  const [panelTab, setPanelTab] = useState<PanelTab>('explore');
   const [searchKind, setSearchKind] = useState<SearchKind>('all');
   /** Pastilles et bâtiments des lieux ajoutés à la carte (après les données, chargées plus tôt). */
   const [poiLayersReady, setPoiLayersReady] = useState(false);
@@ -488,17 +577,6 @@ export default function Domain3DViewer({
     if (boundsRef.current) flyToBounds(boundsRef.current, domain.overviewBearing, OVERVIEW_PITCH, animate);
   };
 
-  const showValley = (valley: DomainValley) => {
-    setSpinning(false);
-    if (!isWide()) setPanelOpen(false);
-    const bounds = new LngLatBounds();
-    valley.villages.forEach((v) => bounds.extend([v.lng, v.lat]));
-    // Marge autour des villages, pour voir les pistes qui les dominent.
-    const { lng, lat } = bounds.getCenter();
-    bounds.extend([lng - 0.03, lat - 0.03]).extend([lng + 0.03, lat + 0.03]);
-    flyToBounds(bounds, valley.bearing, 60);
-  };
-
   const showVillage = (village: DomainVillage, bearing: number) => {
     setSpinning(false);
     if (!isWide()) setPanelOpen(false);
@@ -510,10 +588,19 @@ export default function Domain3DViewer({
     if (!map) return;
     const category = CATEGORY.get(poi.category)!;
     popupRef.current?.remove();
-    popupRef.current = new Popup({ offset: 16, maxWidth: '260px' })
-      .setLngLat([poi.lng, poi.lat])
-      .setDOMContent(placePopupContent({ ...poi, kind: `${category.emoji} ${poi.kind}` }, { label: '▶ Y aller', onClick: () => goToRef.current?.(poi) }))
-      .addTo(map);
+    popupRef.current = openReactPopup(map, [poi.lng, poi.lat], (close) => (
+      <PlaceCard
+        name={poi.name}
+        kind={poi.name === poi.kind ? category.label : poi.kind}
+        color={category.color}
+        icon={POI_ICONS[poi.category]}
+        openingHours={poi.openingHours}
+        phone={poi.phone}
+        website={poi.website}
+        onGo={() => goToRef.current?.({ kind: 'poi', poi })}
+        onClose={close}
+      />
+    ));
   };
 
   /** Depuis la recherche : affiche la catégorie du lieu, amène la vue dessus et ouvre sa bulle. */
@@ -633,8 +720,10 @@ export default function Domain3DViewer({
     // Filet de sécurité : jamais plus de 30 s d'écran de chargement, même si une donnée n'arrive pas.
     const bootTimeout = setTimeout(() => !cancelled && setBoot(BOOT_STEPS.map((s) => s.id)), 30_000);
     let roadLines: number[][][] = [];
+    let buildingClearings: ReturnType<typeof placeClearings> = [];
     const syncClearings = () =>
       forestTrees?.setClearings([
+        ...buildingClearings,
         ...linesRef.current.pistes.map((l) => ({ coordinates: l.coordinates, halfWidth: 16 })),
         ...linesRef.current.lifts.map((l) => ({ coordinates: l.coordinates, halfWidth: 7 })),
         ...roadLines.map((coordinates) => ({ coordinates, halfWidth: 7 })),
@@ -719,9 +808,18 @@ export default function Domain3DViewer({
     };
 
     // Lieux chargés dès l'ouverture, sans attendre la carte : la recherche s'en sert tout de suite.
-    const poisData: Promise<DomainPois | null> = fetch(domain.poisUrl)
-      .then((r) => (r.ok ? r.json() : null))
-      .catch(() => null);
+    // Corrections facultatives (plan officiel, offices de tourisme) : sans elles, la carte reste celle d'OpenStreetMap.
+    const correctionsData: Promise<DomainCorrections | null> = domain.correctionsUrl
+      ? fetch(domain.correctionsUrl)
+          .then((r) => (r.ok ? (r.json() as Promise<DomainCorrections>) : null))
+          .catch(() => null)
+      : Promise.resolve(null);
+    const poisData: Promise<DomainPois | null> = Promise.all([
+      fetch(domain.poisUrl)
+        .then((r): Promise<DomainPois> | null => (r.ok ? r.json() : null))
+        .catch(() => null),
+      correctionsData,
+    ]).then(([res, corrections]) => (res ? { ...res, pois: applyPoiCorrections(res.pois, corrections) } : null));
     void poisData.then((res) => {
       if (cancelled || !res?.pois.length) return;
       poisRef.current = res.pois;
@@ -817,7 +915,10 @@ export default function Domain3DViewer({
       );
 
       // Chalets, toilettes, postes de secours, tables de pique-nique… sous les pastilles des lieux.
-      stopBuildings = addPlaceBuildings(map, mountainPlaces(res.pois, builtAreas), 'pois');
+      const places = mountainPlaces(res.pois, builtAreas);
+      stopBuildings = addPlaceBuildings(map, places, 'pois');
+      buildingClearings = placeClearings(places);
+      syncClearings();
       // Calques prêts : le filtre des catégories cochées peut s'y appliquer.
       setPoiLayersReady(true);
     };
@@ -825,12 +926,7 @@ export default function Domain3DViewer({
     const load = async () => {
       const [pisteMap, corrections] = await Promise.all([
         fetch(domain.pistesUrl).then((r): Promise<StationPisteMap> | null => (r.ok ? r.json() : null)),
-        // Corrections facultatives : sans elles, la carte reste celle d'OpenStreetMap.
-        domain.correctionsUrl
-          ? fetch(domain.correctionsUrl)
-              .then((r) => (r.ok ? (r.json() as Promise<DomainCorrections>) : null))
-              .catch(() => null)
-          : null,
+        correctionsData,
       ]);
       if (cancelled) return;
       if (!pisteMap) {
@@ -850,6 +946,12 @@ export default function Domain3DViewer({
 
       map.addSource('pistes', { type: 'geojson', data: data.pistes });
       map.addSource('lifts', { type: 'geojson', data: data.lifts });
+      // Rang de chaque tracé par identifiant OpenStreetMap : état en direct posé par setFeatureState.
+      liveIdsRef.current = {
+        pistes: new Map(data.pistes.features.map((f) => [String(f.properties.osmId), f.id])),
+        lifts: new Map(data.lifts.features.map((f) => [String(f.properties.osmId), f.id])),
+      };
+      liveAppliedRef.current.clear();
       const round = { 'line-cap': 'round' as const, 'line-join': 'round' as const };
       // Liseré blanc sous les tracés : les pistes noires et les remontées restent lisibles sur l'image satellite.
       map.addLayer({
@@ -857,7 +959,7 @@ export default function Domain3DViewer({
         type: 'line',
         source: 'pistes',
         layout: round,
-        paint: { 'line-color': '#ffffff', 'line-opacity': 0.75, 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.6, 13, 3.6, 16, 7] },
+        paint: { 'line-color': '#ffffff', 'line-opacity': whenShut(0.3, 0.75), 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.6, 13, 3.6, 16, 7] },
       });
       map.addLayer({
         id: 'pistes',
@@ -866,6 +968,8 @@ export default function Domain3DViewer({
         layout: round,
         paint: {
           'line-color': ['match', ['get', 'difficulty'], 'green', PISTE_COLORS.green, 'blue', PISTE_COLORS.blue, 'red', PISTE_COLORS.red, 'black', PISTE_COLORS.black, PISTE_COLORS.unknown],
+          // Piste fermée ou hors saison (conditions en direct) : estompée.
+          'line-opacity': whenShut(LIVE_CLOSED_OPACITY, 1),
           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.9, 13, 2.2, 16, 4.5],
         },
       });
@@ -875,7 +979,7 @@ export default function Domain3DViewer({
         source: 'lifts',
         filter: NOT_DRAG,
         // Estompé de près : les câbles en 3D prennent le relais.
-        paint: { 'line-color': '#ffffff', 'line-opacity': ['interpolate', ['linear'], ['zoom'], 12.5, 0.8, 14.5, 0.25], 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.4, 14, 3.4] },
+        paint: { 'line-color': '#ffffff', 'line-opacity': ['interpolate', ['linear'], ['zoom'], 12.5, whenShut(0.35, 0.8), 14.5, whenShut(0.1, 0.25)], 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.4, 14, 3.4] },
       });
       map.addLayer({
         id: 'lifts',
@@ -884,7 +988,7 @@ export default function Domain3DViewer({
         filter: NOT_DRAG,
         paint: {
           'line-color': '#1a1a20',
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], 12.5, 1, 14.5, 0.35],
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 12.5, whenShut(LIVE_CLOSED_OPACITY, 1), 14.5, whenShut(0.15, 0.35)],
           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.7, 14, 1.8],
           'line-dasharray': [3, 2],
         },
@@ -899,6 +1003,7 @@ export default function Domain3DViewer({
         layout: { 'line-cap': 'round' },
         paint: {
           'line-color': '#1a1a20',
+          'line-opacity': whenShut(LIVE_CLOSED_OPACITY, 1),
           'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.8, 14, 2],
           'line-gap-width': 0,
         },
@@ -918,6 +1023,24 @@ export default function Domain3DViewer({
           'icon-allow-overlap': true,
           'icon-ignore-placement': true,
         },
+        paint: { 'icon-opacity': whenShut(LIVE_CLOSED_OPACITY, 1) },
+      });
+      // Piste fermée (conditions en direct) : croix rouge au milieu du tracé. L'état vient de
+      // feature-state, que seul le style (pas le filtre) sait lire : la croix est masquée ailleurs.
+      map.addImage('closed-cross', closedCrossIcon(), { pixelRatio: 2 });
+      map.addLayer({
+        id: 'pistes-closed',
+        type: 'symbol',
+        source: 'pistes',
+        filter: LONG_ENOUGH,
+        layout: {
+          'symbol-placement': 'line-center',
+          'icon-image': 'closed-cross',
+          'icon-size': ['interpolate', ['linear'], ['zoom'], 10, 0.9, 13, 1.3, 16, 1.6],
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+        },
+        paint: { 'icon-opacity': ['case', ['==', LIVE_STATE, 'closed'], 1, 0] },
       });
       // Tracé survolé, redessiné en surbrillance (toute la piste : mêmes nom et couleur).
       map.addLayer({
@@ -987,6 +1110,29 @@ export default function Domain3DViewer({
         },
       });
       // Choix du départ : un toucher sur la carte.
+      // Clic sur une piste ou une remontée : sa bulle (état en direct, motif, « Y aller »).
+      // Un lieu cliqué au même endroit garde la priorité (sa propre bulle).
+      map.on('click', (e) => {
+        if (pickingRef.current) return;
+        if (map.getLayer('pois') && map.queryRenderedFeatures(e.point, { layers: ['pois'] }).length) return;
+        const { x, y } = e.point;
+        const box = (r: number): [[number, number], [number, number]] => [
+          [x - r, y - r],
+          [x + r, y + r],
+        ];
+        // Croix d'une piste fermée sous le doigt : c'est cette piste-là (les croix masquées ne comptent pas).
+        const cross = map.getLayer('pistes-closed')
+          ? map.queryRenderedFeatures(box(12), { layers: ['pistes-closed'] }).find((h) => h.state?.live === 'closed')
+          : undefined;
+        // Sinon le tracé le plus proche : petite zone d'abord, élargie si le clic tombe à côté.
+        const near = (r: number) => {
+          const hit = map.queryRenderedFeatures(box(r), { layers: ['pistes', 'lifts', 'lifts-drag'] });
+          return hit.find((h) => h.properties.name) ?? hit[0];
+        };
+        const f = cross ?? near(3) ?? near(8);
+        if (!f) return;
+        openTrackRef.current?.({ layer: f.layer.id === 'pistes' || f.layer.id === 'pistes-closed' ? 'pistes' : 'lifts', properties: f.properties }, [e.lngLat.lng, e.lngLat.lat]);
+      });
       map.on('click', (e) => {
         if (!pickingRef.current) return;
         setPickedStart({ lng: e.lngLat.lng, lat: e.lngLat.lat });
@@ -1097,12 +1243,14 @@ export default function Domain3DViewer({
           map.setFilter('hover-lift', name ? ['==', ['get', 'name'], name] : none);
           const type = LIFT_LABELS[f.properties.liftType] ?? 'Remontée';
           const length = Number(f.properties.length);
-          setHover({ color: '#1a1a20', title: name || type, detail: `${name ? `${type} · ` : ''}${length.toLocaleString('fr-FR')} m` });
+          const live = liveText(liveRef.current?.openings.lifts[String(f.properties.osmId)]);
+          setHover({ color: '#1a1a20', title: name || type, detail: `${name ? `${type} · ` : ''}${length.toLocaleString('fr-FR')} m`, live });
         } else {
           const difficulty = f.properties.difficulty as PisteDifficulty;
           map.setFilter('hover-lift', none);
           map.setFilter('hover', name ? ['all', ['==', ['get', 'name'], name], ['==', ['get', 'difficulty'], difficulty]] : none);
-          setHover({ color: PISTE_COLORS[difficulty], title: name || 'Liaison', detail: DIFFICULTY_SINGULAR[difficulty] });
+          const live = liveText(liveRef.current?.openings.pistes[String(f.properties.osmId)]);
+          setHover({ color: PISTE_COLORS[difficulty], title: name || 'Liaison', detail: DIFFICULTY_SINGULAR[difficulty], live });
         }
       };
 
@@ -1192,6 +1340,7 @@ export default function Domain3DViewer({
     const filter: FilterSpecification = ['in', ['get', 'difficulty'], ['literal', shown]];
     map.setFilter('pistes', filter);
     map.setFilter('pistes-casing', filter);
+    if (map.getLayer('pistes-closed')) map.setFilter('pistes-closed', ['all', filter, LONG_ENOUGH]);
     if (map.getLayer('piste-labels')) map.setFilter('piste-labels', ['all', filter, ['!=', ['get', 'name'], '']]);
   }, [enabled, status]);
 
@@ -1206,24 +1355,55 @@ export default function Domain3DViewer({
     }
   }, [showLifts, status]);
 
-  // Les pastilles suivent les catégories cochées dans le panneau.
+  // Conditions en direct : état de chaque tracé (feature-state), relu par le survol.
+  useEffect(() => {
+    liveRef.current = live.data;
+    const map = mapRef.current;
+    const ids = liveIdsRef.current;
+    if (!map || status !== 'ready' || !ids || !live.data || !map.getSource('pistes')) return;
+    // Source muette : on garde le dernier état posé plutôt que de tout rallumer.
+    if (!live.data.openings.source.ok) return;
+    const applied = liveAppliedRef.current;
+    // Tracés sans état (liaisons sans nom, noms absents de la source) : neutres, sauf hors saison
+    // où rien n'est ouvert.
+    const fallback = live.data.openings.outOfSeason ? 'out' : '';
+    for (const source of ['pistes', 'lifts'] as const) {
+      const states = live.data.openings[source];
+      for (const [osmId, id] of ids[source]) {
+        if (id === undefined) continue;
+        // Hors saison, une station peut dire « fermée » plutôt que « hors saison » (Risoul) : tout est
+        // alors estompé pareil, sans croix rouge sur chaque piste.
+        const raw = states[osmId]?.status ?? fallback;
+        const next = live.data.openings.outOfSeason && raw === 'closed' ? 'out' : raw;
+        const key = `${source}|${id}`;
+        if ((applied.get(key) ?? '') === next) continue;
+        applied.set(key, next);
+        map.setFeatureState({ source, id }, { live: next || null });
+      }
+    }
+  }, [live.data, status]);
+
+  // Les pastilles suivent les catégories cochées dans le panneau ; un type de lieu choisi dans la
+  // recherche (« Restaurants »…) ne laisse que ces lieux-là sur la carte, cochés ou non.
+  const searchedPoi = SEARCH_KIND_POIS[searchKind];
   useEffect(() => {
     const map = mapRef.current;
     if (!map || pois.length === 0 || !map.getLayer('pois')) return;
-    map.setFilter('pois', ['in', ['get', 'category'], ['literal', [...enabledPois]]]);
+    const shown = searchedPoi ? new Set<DomainPoiCategoryId>([searchedPoi]) : enabledPois;
+    map.setFilter('pois', ['in', ['get', 'category'], ['literal', [...shown]]]);
     for (const id of ['park-zones-fill', 'park-zones-outline', 'park-zones-run', 'park-zones-label', PARK_FEATURES_LAYER]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', enabledPois.has('snowpark') ? 'visible' : 'none');
+      if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', shown.has('snowpark') ? 'visible' : 'none');
     }
     // Leurs bâtiments suivent les mêmes cases.
-    if (map.getLayer(BUILDINGS_LAYER)) map.setFilter(BUILDINGS_LAYER, ['in', ['get', 'cat'], ['literal', [...enabledPois]]]);
+    if (map.getLayer(BUILDINGS_LAYER)) map.setFilter(BUILDINGS_LAYER, ['in', ['get', 'cat'], ['literal', [...shown]]]);
     const open = popupRef.current;
     // La bulle d'un lieu dont on vient de masquer la catégorie n'a plus de repère : on la ferme.
     if (open?.isOpen()) {
       const { lng, lat } = open.getLngLat();
       const poi = pois.find((p) => p.lng === lng && p.lat === lat);
-      if (poi && !enabledPois.has(poi.category)) open.remove();
+      if (poi && !shown.has(poi.category)) open.remove();
     }
-  }, [enabledPois, pois, poiLayersReady]);
+  }, [enabledPois, searchedPoi, pois, poiLayersReady]);
 
   const poiCounts = useMemo(() => {
     const counts = new Map<DomainPoiCategoryId, number>();
@@ -1281,6 +1461,12 @@ export default function Domain3DViewer({
   }, [pois, lines, domain.valleys]);
 
   /** Résultats : le type choisi, filtré par le texte, du plus proche au plus loin si l'on est localisé. */
+  /** Types de recherche qui ont au moins un résultat (pas de puce « Refuges » sans refuge). */
+  const searchKinds = useMemo(() => {
+    const present = new Set(searchIndex.map((e) => e.kind));
+    return SEARCH_KINDS.filter((k) => k.id === 'all' || present.has(k.id));
+  }, [searchIndex]);
+
   const found = useMemo(() => {
     const q = normalize(query.trim());
     if (searchKind === 'all' && q.length < 2) return null;
@@ -1361,7 +1547,8 @@ export default function Domain3DViewer({
   /** Partage de la vue courante : feuille de partage du téléphone, sinon lien copié. */
   const share = async () => {
     // Intégrée : on partage la carte plein écran d'AltiStay, pas l'adresse de l'iframe.
-    const url = embedded ? `${window.location.origin}/carte/${domain.slug}${window.location.hash}` : window.location.href;
+    // Dans l'appli mobile (paquet hors ligne), l'adresse publique de la carte, pas celle du téléphone.
+    const url = embedded ? `${siteOrigin()}/carte/${domain.slug}${window.location.hash}` : window.location.href;
     try {
       if (navigator.share && !isWide()) {
         await navigator.share({ title: `${domain.name} en 3D`, url });
@@ -1399,6 +1586,42 @@ export default function Domain3DViewer({
       : navigating
         ? `g${Math.round(routeStart.lng * 2500)},${Math.round(routeStart.lat * 3500)}`
         : 'gps';
+
+  /**
+   * Pistes et remontées fermées d'après les conditions en direct (index des tracés de la carte,
+   * les mêmes que ceux du réseau d'itinéraire). Hors saison, rien n'est exclu : l'itinéraire
+   * reste un aperçu du domaine plutôt que « aucun chemin ».
+   */
+  const closedKey = useMemo(() => {
+    const o = live.data?.openings;
+    if (!o?.source.ok || o.outOfSeason) return '';
+    const shut = (states: Record<string, LiveItemState>) =>
+      Object.entries(states)
+        .filter(([, st]) => st.status === 'closed')
+        .map(([id]) => id)
+        .sort()
+        .join(',');
+    return `${shut(o.pistes)}|${shut(o.lifts)}`;
+  }, [live.data]);
+  const closedLines = (): ClosedLines | undefined => {
+    const ids = liveIdsRef.current;
+    if (!closedKey || !ids) return undefined;
+    const [pistes, lifts] = closedKey.split('|');
+    const toIndex = (list: string, map: Map<string, string | number | undefined>) =>
+      new Set(list ? list.split(',').flatMap((osmId) => (typeof map.get(osmId) === 'number' ? [map.get(osmId) as number] : [])) : []);
+    return { pistes: toIndex(pistes, ids.pistes), lifts: toIndex(lifts, ids.lifts) };
+  };
+  /** Pistes et remontées fermées, comptées par nom (une piste OSM est souvent découpée en tronçons). */
+  const countClosed = (closed: ClosedLines | undefined) => {
+    if (!closed) return 0;
+    const { pistes, lifts } = linesRef.current;
+    const names = new Set<string>();
+    closed.pistes.forEach((i) => pistes[i] && names.add(`p|${pistes[i].name || i}|${pistes[i].detail}`));
+    closed.lifts.forEach((i) => lifts[i] && names.add(`l|${lifts[i].name || i}`));
+    return names.size;
+  };
+  /** Nombre de tracés fermés évités par l'itinéraire affiché. */
+  const [closedCount, setClosedCount] = useState(0);
 
   /** Réseau des pistes, construit une fois au premier itinéraire (relief à charger). */
   const ensureGraph = () => {
@@ -1438,7 +1661,9 @@ export default function Domain3DViewer({
       if (!ready) setRouteStatus('preparing');
       const g = await ensureGraph();
       if (stale) return;
-      const result = planRoute(g, routeStart, goalTargets(routeGoal), routeLevel);
+      const closed = closedLines();
+      const result = planRoute(g, routeStart, goalTargets(routeGoal), routeLevel, closed);
+      setClosedCount(countClosed(closed));
       setRoute(result);
       setRouteStatus(result ? 'ready' : 'none');
       // Arrivé à moins de 60 m de la destination (à vol d'oiseau) : fin du guidage.
@@ -1468,7 +1693,7 @@ export default function Domain3DViewer({
     };
     // Recalcul sur le départ arrondi (startKey), pas sur chaque position GPS.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeOpen, routeGoal, routeLevel, startKey]);
+  }, [routeOpen, routeGoal, routeLevel, startKey, closedKey]);
 
   // Tracé de l'itinéraire sur la carte, et cadrage quand la destination change.
   useEffect(() => {
@@ -1687,14 +1912,93 @@ export default function Domain3DViewer({
    * tout de suite si un départ est connu (GPS ou point choisi) ; sinon, la fiche
    * d'itinéraire propose de choisir le départ.
    */
-  const goTo = (poi: DomainPoi) => {
+  const goTo = (goal: RouteGoal) => {
     popupRef.current?.remove();
-    openRoute({ kind: 'poi', poi });
+    openRoute(goal);
     if (gpsStart || pickedStart || geoStatus === 'searching') startNavigation();
   };
-  // La bulle (créée hors de React) appelle la version à jour de goTo.
+
+  /**
+   * Bulle d'une piste ou d'une remontée : état en direct (ouverte, fermée et pourquoi), longueur
+   * de la piste entière (tous ses tronçons de même nom et couleur), et « Y aller » : vers le haut
+   * de la piste, ou la gare de départ de la remontée.
+   */
+  const openTrack = (f: { layer: 'pistes' | 'lifts'; properties: Record<string, unknown> }, at: [number, number]) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const props = f.properties;
+    const osmId = String(props.osmId);
+    const name = String(props.name ?? '');
+    const openings = liveRef.current?.openings;
+    const liveOk = !!openings?.source.ok;
+    const demo = !!liveRef.current?.demo;
+    // Hors saison, « fermée » se lit « hors saison » (comme sur la carte, sans croix).
+    const seasonal = (st: LiveItemState | undefined): LiveItemState | undefined =>
+      openings?.outOfSeason && st?.status === 'closed' ? { ...st, status: 'out', label: 'Hors saison', message: undefined } : st;
+    popupRef.current?.remove();
+    if (f.layer === 'pistes') {
+      const difficulty = props.difficulty as PisteDifficulty;
+      // Tous les tronçons de la piste (une piste sans nom : ce seul tronçon).
+      const own = linesRef.current.pistes.filter((l) => (name ? l.name === name && l.detail === difficulty : false));
+      const segments = own.length ? own.map((l) => l.coordinates) : [];
+      const length = segments.length ? segments.reduce((sum, c) => sum + lineLength(c), 0) : Number(props.length ?? 0);
+      const go = () => {
+        let best = -Infinity;
+        let top: number[] = segments[0]?.[0] ?? at;
+        for (const coords of segments) {
+          for (const c of [coords[0], coords[coords.length - 1]]) {
+            const z = map.queryTerrainElevation([c[0], c[1]]);
+            if (z !== null && z > best) {
+              best = z;
+              top = c;
+            }
+          }
+        }
+        goToRef.current?.({ kind: 'place', place: { id: `piste/${osmId}`, name: name || 'Liaison', lng: top[0], lat: top[1] } });
+      };
+      popupRef.current = openReactPopup(map, at, (close) => (
+        <TrackCard
+          kind="piste"
+          name={name || 'Liaison'}
+          typeLabel={DIFFICULTY_SINGULAR[difficulty] ?? 'Piste'}
+          color={PISTE_COLORS[difficulty] ?? PISTE_COLORS.unknown}
+          length={length}
+          state={seasonal(openings?.pistes[osmId])}
+          outOfSeason={!!openings?.outOfSeason}
+          liveAvailable={liveOk}
+          demo={demo}
+          goLabel="Aller en haut de la piste"
+          onGo={go}
+          onClose={close}
+        />
+      ));
+      return;
+    }
+    const type = LIFT_LABELS[String(props.liftType)] ?? 'Remontée';
+    const lift = linesRef.current.lifts.find((l) => l.name === name && l.detail === props.liftType);
+    const bottom = lift?.coordinates[0] ?? at;
+    popupRef.current = openReactPopup(map, at, (close) => (
+      <TrackCard
+        kind="lift"
+        name={name || type}
+        typeLabel={type}
+        color="#1a1a20"
+        length={Number(props.length ?? 0)}
+        state={seasonal(openings?.lifts[osmId])}
+        outOfSeason={!!openings?.outOfSeason}
+        liveAvailable={liveOk}
+        demo={demo}
+        goLabel="Aller à la gare de départ"
+        onGo={() => goToRef.current?.({ kind: 'place', place: { id: `lift/${osmId}`, name: name || type, lng: bottom[0], lat: bottom[1] } })}
+        onClose={close}
+      />
+    ));
+  };
+
+  // Les bulles (créées hors de React) appellent les versions à jour de ces fonctions.
   useEffect(() => {
     goToRef.current = goTo;
+    openTrackRef.current = openTrack;
   });
 
   // Pendant le guidage, la carte suit le skieur, vue inclinée vers l'avant.
@@ -1714,6 +2018,12 @@ export default function Domain3DViewer({
       active ? 'border-primary bg-primary text-primary-foreground' : 'border-winter-200 bg-card/95 text-foreground/75 hover:border-primary'
     }`;
 
+  const panelHeading = 'mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground/55';
+  const panelLink =
+    'inline-flex h-9 items-center gap-1.5 rounded-full px-2 text-[13px] font-semibold text-foreground/60 transition-colors hover:bg-winter-50 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50';
+  const textButton =
+    'inline-flex h-8 items-center rounded-full px-2.5 text-xs font-semibold text-primary transition-colors hover:bg-winter-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50';
+
   const ready = status === 'ready';
   const booting = ready && boot.length < BOOT_STEPS.length;
 
@@ -1724,272 +2034,311 @@ export default function Domain3DViewer({
 
       {/* Panneau du domaine */}
       {panelOpen && (
-        <aside className="absolute inset-x-3 bottom-3 z-20 flex max-h-[62vh] flex-col overflow-hidden rounded-3xl border border-white/60 bg-card/95 shadow-2xl sm:right-auto sm:top-3 sm:max-h-none sm:w-[348px]">
-          <div className="border-b border-winter-100 px-5 pb-4 pt-4">
+        <aside className="absolute inset-x-3 bottom-3 z-20 flex max-h-[68vh] flex-col overflow-hidden rounded-[28px] border border-white/70 bg-background/95 shadow-2xl backdrop-blur-md sm:right-auto sm:top-3 sm:max-h-none sm:w-[360px]">
+          {/* En-tête : nom du domaine, chiffres, recherche et onglets restent visibles. */}
+          <div className="border-b border-winter-100 bg-card/80 px-4 pb-3 pt-3">
             <div className="flex items-center justify-between">
               {embedded ? (
-                <a
-                  href={`/carte/${domain.slug}`}
-                  target="_blank"
-                  rel="noopener"
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground/50 hover:text-primary"
-                >
-                  Carte AltiStay <ExternalLink className="h-3 w-3" />
+                <a href={`${siteOrigin()}/carte/${domain.slug}`} target="_blank" rel="noopener" className={panelLink}>
+                  Carte AltiStay <ExternalLink className="h-3.5 w-3.5" aria-hidden />
                 </a>
               ) : SEARCH_SITE_URL ? (
-                  <a href={SEARCH_SITE_URL} className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground/50 hover:text-primary">
-                    <ArrowLeft className="h-3.5 w-3.5" /> AltiStay
-                  </a>
+                <a href={SEARCH_SITE_URL} className={panelLink}>
+                  <ArrowLeft className="h-4 w-4" aria-hidden /> AltiStay
+                </a>
               ) : (
-                  <span />
+                <span />
               )}
-              <button type="button" onClick={() => setPanelOpen(false)} aria-label="Masquer le panneau" className="text-foreground/40 hover:text-foreground">
+              <button
+                type="button"
+                onClick={() => setPanelOpen(false)}
+                aria-label="Masquer le panneau"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-foreground/50 transition-colors hover:bg-winter-50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <h1 className={`mt-2 font-display leading-tight text-foreground ${domain.name.length > 14 ? 'text-2xl' : 'text-3xl'}`}>
-              {domain.name} <span className="italic text-accent">en 3D</span>
-            </h1>
-            <p className="mt-1 text-xs text-foreground/50">{domain.subtitle}</p>
+            <div className="px-1">
+              <h1 className={`font-display leading-tight text-foreground ${domain.name.length > 14 ? 'text-2xl sm:text-[26px]' : 'text-2xl sm:text-3xl'}`}>
+                {domain.name} <span className="italic text-accent">en 3D</span>
+              </h1>
+              <p className="mt-0.5 hidden text-[13px] text-foreground/55 sm:block">{domain.subtitle}</p>
+              {live.data?.demo && (
+                <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-900">
+                  <FlaskConical className="h-3.5 w-3.5" aria-hidden /> Simulation pleine saison
+                </p>
+              )}
+            </div>
 
             {stats && (
-              <dl className="mt-4 grid grid-cols-3 gap-2 text-center">
+              <dl className="mt-3 hidden grid-cols-3 divide-x divide-winter-100 rounded-2xl bg-winter-50/70 py-2.5 text-center sm:grid">
                 {[
                   [stats.totalKm.toLocaleString('fr-FR'), 'km de pistes'],
                   [stats.slopes.toLocaleString('fr-FR'), 'pistes'],
                   [stats.lifts.toLocaleString('fr-FR'), 'remontées'],
                 ].map(([value, label]) => (
-                  <div key={label} className="rounded-2xl bg-winter-50 px-1 py-2">
-                    <dd className="font-display text-xl leading-none text-foreground">{value}</dd>
-                    <dt className="mt-1 text-[10px] font-medium uppercase tracking-wide text-foreground/50">{label}</dt>
+                  <div key={label} className="flex flex-col-reverse">
+                    <dt className="mt-1 text-[11px] text-foreground/55">{label}</dt>
+                    <dd className="font-display text-[22px] leading-none text-foreground">{value}</dd>
                   </div>
                 ))}
               </dl>
             )}
-          </div>
 
-          <div className="flex-1 overflow-y-auto">
-            <section className="border-b border-winter-100 px-5 py-4">
-              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Pistes affichées</h2>
-              <div className="grid grid-cols-2 gap-1.5">
-                {DIFFICULTIES.map((d) => {
-                  const on = enabled.has(d);
+            <div className="relative mt-3">
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground/45" aria-hidden />
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setPanelTab('explore');
+                }}
+                placeholder={searchKind === 'all' ? 'Restaurant, remontée, piste, station…' : `Nom (${SEARCH_KINDS.find((k) => k.id === searchKind)!.label.toLowerCase()})…`}
+                aria-label="Rechercher sur la carte"
+                className="h-11 w-full rounded-2xl border border-winter-200 bg-card pl-10 pr-10 text-[15px] text-foreground placeholder:text-foreground/40 transition focus:border-primary/50 focus:outline-none focus:ring-4 focus:ring-primary/10 [&::-webkit-search-cancel-button]:hidden"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  aria-label="Effacer la recherche"
+                  className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-foreground/45 hover:bg-winter-50 hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {domain.live && (
+              <div role="tablist" aria-label="Contenu du panneau" className="mt-3 grid grid-cols-2 gap-1 rounded-full bg-winter-50 p-1">
+                {PANEL_TABS.map(([id, label]) => {
+                  const active = panelTab === id;
                   return (
                     <button
-                      key={d}
+                      key={id}
                       type="button"
-                      onClick={() => toggleDifficulty(d)}
-                      aria-pressed={on}
-                      className={`flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-left text-xs font-semibold transition ${
-                        on ? 'border-winter-200 bg-card text-foreground' : 'border-transparent bg-winter-50 text-foreground/40'
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setPanelTab(id)}
+                      className={`inline-flex h-9 items-center justify-center gap-2 rounded-full text-[13px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                        active ? 'bg-card text-foreground shadow-sm' : 'text-foreground/55 hover:text-foreground'
                       }`}
                     >
-                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: PISTE_COLORS[d], opacity: on ? 1 : 0.35 }} />
-                      {DIFFICULTY_LABELS[d]}
-                      {stats && <span className="ml-auto font-normal text-foreground/45">{stats.byDifficulty[d]}</span>}
+                      {id === 'conditions' && <span className={`h-2 w-2 rounded-full ${live.data && !live.failed && !live.data.demo ? 'bg-emerald-500' : 'bg-amber-500'}`} aria-hidden />}
+                      {label}
                     </button>
                   );
                 })}
               </div>
-            </section>
-
-            <section className="border-b border-winter-100 px-5 py-4">
-              <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Affichage</h2>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={snow}
-                onClick={() => setSnow((v) => !v)}
-                className="flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm transition hover:bg-winter-50"
-              >
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-winter-50 text-[13px] leading-none">❄️</span>
-                <span className="min-w-0 flex-1">
-                  <span className={`block ${snow ? 'font-medium text-foreground' : 'text-foreground/45'}`}>Montagnes enneigées</span>
-                  <span className="block text-xs text-foreground/45">
-                    {base === 'satellite' ? "Neige d'après l'altitude, sur la photo aérienne" : 'Sur la photo aérienne uniquement'}
-                  </span>
-                </span>
-                <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${snow ? 'bg-primary' : 'bg-winter-200'}`}>
-                  <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${snow ? 'left-3.5' : 'left-0.5'}`} />
-                </span>
-              </button>
-            </section>
-
-            <section className="border-b border-winter-100 px-5 py-4">
-              <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Rechercher</h2>
-              <div className="relative">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-foreground/40" />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={searchKind === 'all' ? 'Restaurant, remontée, piste, station…' : `Nom (${SEARCH_KINDS.find((k) => k.id === searchKind)!.label.toLowerCase()})…`}
-                  aria-label="Rechercher"
-                  className="w-full rounded-xl border border-winter-200 bg-card py-2 pl-9 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-                />
-                {query && (
-                  <button type="button" onClick={() => setQuery('')} aria-label="Effacer la recherche" className="absolute right-2.5 top-2.5 text-foreground/40 hover:text-foreground">
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {SEARCH_KINDS.map((k) => (
-                  <button
-                    key={k.id}
-                    type="button"
-                    onClick={() => setSearchKind(k.id)}
-                    aria-pressed={searchKind === k.id}
-                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-                      searchKind === k.id ? 'border-primary bg-primary text-primary-foreground' : 'border-winter-200 bg-card text-foreground/70 hover:border-primary'
-                    }`}
-                  >
-                    {k.emoji} {k.label}
-                  </button>
-                ))}
-              </div>
-
-              {found && (
-                <ul className="mt-2">
-                  {here && here.offDomain === null && found.length > 0 && <li className="px-2 pb-1 text-[11px] text-foreground/45">Du plus proche au plus loin</li>}
-                  {found.slice(0, SEARCH_RESULTS).map(({ entry: e, distance }) => (
-                    <li key={e.id} className="flex items-center">
-                      <button type="button" onClick={() => showEntry(e)} className="flex min-w-0 flex-1 items-start gap-2.5 rounded-xl px-2 py-1.5 text-left hover:bg-winter-50">
-                        {e.color ? (
-                          <span className="mt-1 h-3 w-3 shrink-0 rounded-full ring-2 ring-white" style={{ backgroundColor: e.color }} />
-                        ) : (
-                          <span className="text-base leading-5">{e.emoji}</span>
-                        )}
-                        <span className="min-w-0">
-                          <span className="block truncate text-sm font-medium text-foreground">{e.name}</span>
-                          <span className="block truncate text-xs text-foreground/50">
-                            {e.sub}
-                            {distance !== null && ` · ${formatDistance(distance)}`}
-                          </span>
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => routeToEntry(e)}
-                        className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-winter-50"
-                        aria-label={`Itinéraire vers ${e.name}`}
-                      >
-                        Y aller
-                      </button>
-                    </li>
-                  ))}
-                  {found.length === 0 && <li className="px-2 py-3 text-center text-sm text-foreground/50">Aucun résultat.</li>}
-                  {found.length > SEARCH_RESULTS && (
-                    <li className="px-2 py-2 text-center text-xs text-foreground/45">{found.length - SEARCH_RESULTS} autres résultats : précisez la recherche.</li>
-                  )}
-                </ul>
-              )}
-            </section>
-
-            {pois.length > 0 && (
-              <section className="border-b border-winter-100 px-5 py-4">
-                <div className="mb-2 flex items-baseline justify-between">
-                  <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Lieux sur la carte</h2>
-                  <div className="flex gap-3 text-[11px] font-semibold text-primary">
-                    <button type="button" onClick={() => setEnabledPois(new Set(DOMAIN_POI_CATEGORIES.map((c) => c.id)))} className="hover:underline">
-                      Tout
-                    </button>
-                    <button type="button" onClick={() => setEnabledPois(new Set())} className="hover:underline">
-                      Aucun
-                    </button>
-                  </div>
-                </div>
-
-                {POI_GROUPS.map((group) => (
-                    <div key={group.title} className="mt-3">
-                      <h3 className="mb-1 text-[11px] font-medium text-foreground/45">{group.title}</h3>
-                      <ul>
-                        {group.categories
-                          .filter((c) => poiCounts.get(c.id))
-                          .map((c) => {
-                            const on = enabledPois.has(c.id);
-                            return (
-                              <li key={c.id}>
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={on}
-                                  onClick={() => togglePoiCategory(c.id)}
-                                  className={`flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm transition hover:bg-winter-50 ${
-                                    on ? 'font-medium text-foreground' : 'text-foreground/45'
-                                  }`}
-                                >
-                                  <span
-                                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 bg-white text-[13px] leading-none transition"
-                                    style={{ borderColor: on ? c.color : 'transparent', opacity: on ? 1 : 0.45 }}
-                                  >
-                                    {c.emoji}
-                                  </span>
-                                  <span className="min-w-0 flex-1 truncate">{c.label}</span>
-                                  <span className="text-xs font-normal text-foreground/45">{poiCounts.get(c.id)}</span>
-                                  <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${on ? 'bg-primary' : 'bg-winter-200'}`}>
-                                    <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${on ? 'left-3.5' : 'left-0.5'}`} />
-                                  </span>
-                                </button>
-                              </li>
-                            );
-                          })}
-                      </ul>
-                    </div>
-                  ))}
-              </section>
             )}
-
-            <section className="px-3 py-3">
-              <h2 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Vallées et villages</h2>
-              {domain.valleys.map((valley) => (
-                <div key={valley.id} className="mb-1.5">
-                  <button
-                    type="button"
-                    onClick={() => showValley(valley)}
-                    className="w-full rounded-xl px-2 py-1.5 text-left font-display text-lg text-foreground hover:bg-winter-50"
-                  >
-                    {valley.name}
-                  </button>
-                  <ul>
-                    {valley.villages.map((village) => {
-                      const linked = SEARCH_SITE_URL && village.stationId && stationIds.includes(village.stationId);
-                      return (
-                        <li key={village.name} className="flex items-center">
-                          <button
-                            type="button"
-                            onClick={() => showVillage(village, valley.bearing)}
-                            className="flex min-w-0 flex-1 items-baseline gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-winter-50"
-                          >
-                            <span className="truncate text-sm font-medium text-foreground">{village.name}</span>
-                            <span className="shrink-0 text-xs text-foreground/45">{village.altitude.toLocaleString('fr-FR')} m</span>
-                          </button>
-                          {linked && (
-                            <a
-                              href={`${SEARCH_SITE_URL}/station/${village.stationId}`}
-                              {...(embedded ? { target: '_blank', rel: 'noopener' } : {})}
-                              className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-winter-50"
-                            >
-                              Fiche station
-                            </a>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              ))}
-            </section>
           </div>
 
-          <p className="border-t border-winter-100 px-5 py-3 text-[11px] leading-snug text-foreground/45">
-            Clic droit (ou Ctrl + glisser) pour pivoter et incliner. Survolez une piste pour connaître son nom, cliquez sur un lieu pour ses informations. Zoomez sur une remontée pour la voir en 3D.
+          {/* Une zone de défilement par onglet : chacun s'ouvre en haut. */}
+          <div key={panelTab} className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+            {domain.live && panelTab === 'conditions' ? (
+              <LivePanel state={live} demo={demo} onToggleDemo={toggleDemo} />
+            ) : (
+              <div className="space-y-6">
+                <section aria-label="Recherche">
+                  <div className="flex flex-wrap gap-1.5">
+                    {searchKinds.map((k) => {
+                      const Icon = SEARCH_ICONS[k.id];
+                      const active = searchKind === k.id;
+                      return (
+                        <button
+                          key={k.id}
+                          type="button"
+                          onClick={() => setSearchKind(active && k.id !== 'all' ? 'all' : k.id)}
+                          aria-pressed={active}
+                          className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                            active ? 'border-primary bg-primary text-primary-foreground' : 'border-winter-200 bg-card text-foreground/75 hover:border-primary/60 hover:text-foreground'
+                          }`}
+                        >
+                          <Icon className="h-3.5 w-3.5" aria-hidden />
+                          {k.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {searchedPoi && (
+                    <p className="mt-2.5 flex items-center justify-between gap-2 rounded-xl bg-winter-50 px-3 py-2 text-xs text-foreground/70">
+                      <span>
+                        Carte : seuls les <span className="font-semibold text-foreground">{CATEGORY.get(searchedPoi)!.label.toLowerCase()}</span> sont affichés.
+                      </span>
+                      <button type="button" onClick={() => setSearchKind('all')} className="shrink-0 font-semibold text-primary hover:underline">
+                        Tout afficher
+                      </button>
+                    </p>
+                  )}
+                  {found && (
+                    <div className="mt-3 overflow-hidden rounded-2xl border border-winter-100 bg-card">
+                      {here && here.offDomain === null && found.length > 0 && (
+                        <p className="border-b border-winter-100 px-3 py-2 text-xs text-foreground/55">Du plus proche au plus loin</p>
+                      )}
+                      <ul className="divide-y divide-winter-100">
+                        {found.slice(0, SEARCH_RESULTS).map(({ entry: e, distance }) => {
+                          const Icon = e.poi ? POI_ICONS[e.poi.category] : e.kind === 'other' ? SEARCH_ICONS.all : SEARCH_ICONS[e.kind];
+                          const tint = e.poi ? CATEGORY.get(e.poi.category)!.color : e.kind === 'lift' ? '#7048e8' : '#386690';
+                          return (
+                            <li key={e.id} className="flex items-center gap-1 pr-2">
+                              <button
+                                type="button"
+                                onClick={() => showEntry(e)}
+                                className="flex min-h-14 min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-winter-50 focus-visible:bg-winter-50 focus-visible:outline-none"
+                              >
+                                {e.color ? (
+                                  <span className="flex h-8 w-8 shrink-0 items-center justify-center">
+                                    <span className="h-3.5 w-3.5 rounded-full ring-4 ring-winter-50" style={{ backgroundColor: e.color }} />
+                                  </span>
+                                ) : (
+                                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full" style={{ backgroundColor: `${tint}1a`, color: tint }}>
+                                    <Icon className="h-4 w-4" aria-hidden />
+                                  </span>
+                                )}
+                                <span className="min-w-0">
+                                  <span className="block truncate text-sm font-semibold text-foreground">{e.name}</span>
+                                  <span className="block truncate text-xs text-foreground/55">
+                                    {e.sub}
+                                    {distance !== null && ` · ${formatDistance(distance)}`}
+                                  </span>
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => routeToEntry(e)}
+                                className="inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-3 text-xs font-semibold text-primary transition-colors hover:bg-winter-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                aria-label={`Itinéraire vers ${e.name}`}
+                              >
+                                <Navigation className="h-3.5 w-3.5" aria-hidden /> Y aller
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {found.length === 0 && <p className="px-3 py-5 text-center text-sm text-foreground/55">Aucun résultat.</p>}
+                      {found.length > SEARCH_RESULTS && (
+                        <p className="border-t border-winter-100 px-3 py-2.5 text-center text-xs text-foreground/55">
+                          {found.length - SEARCH_RESULTS} autres résultats : précisez la recherche.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <h2 className={panelHeading}>Pistes affichées</h2>
+                  <div className="grid grid-cols-2 gap-2">
+                    {DIFFICULTIES.map((d) => {
+                      const on = enabled.has(d);
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => toggleDifficulty(d)}
+                          aria-pressed={on}
+                          className={`flex h-11 items-center gap-2.5 rounded-2xl border px-3 text-left text-[13px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                            on ? 'border-winter-200 bg-card text-foreground shadow-sm' : 'border-dashed border-winter-200 bg-transparent text-foreground/45'
+                          }`}
+                        >
+                          <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: PISTE_COLORS[d], opacity: on ? 1 : 0.3 }} />
+                          {DIFFICULTY_LABELS[d]}
+                          {stats && <span className="ml-auto text-xs font-medium tabular-nums text-foreground/50">{stats.byDifficulty[d]}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                {pois.length > 0 && (
+                  <section>
+                    <div className="mb-2 flex items-center justify-between">
+                      <h2 className={`${panelHeading} !mb-0`}>Lieux sur la carte</h2>
+                      <div className="flex gap-1">
+                        <button type="button" onClick={() => setEnabledPois(new Set(DOMAIN_POI_CATEGORIES.map((c) => c.id)))} className={textButton}>
+                          Tout
+                        </button>
+                        <button type="button" onClick={() => setEnabledPois(new Set())} className={textButton}>
+                          Aucun
+                        </button>
+                      </div>
+                    </div>
+
+                    {POI_GROUPS.map((group) => {
+                      const categories = group.categories.filter((c) => poiCounts.get(c.id));
+                      if (!categories.length) return null;
+                      return (
+                        <div key={group.title} className="mt-4">
+                          <h3 className="mb-1.5 px-1 text-xs font-medium text-foreground/55">{group.title}</h3>
+                          <ul className="divide-y divide-winter-100 overflow-hidden rounded-2xl border border-winter-100 bg-card">
+                            {categories.map((c) => {
+                              const on = enabledPois.has(c.id);
+                              const Icon = POI_ICONS[c.id];
+                              return (
+                                <li key={c.id}>
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={on}
+                                    onClick={() => togglePoiCategory(c.id)}
+                                    className="flex min-h-12 w-full items-center gap-3 px-3 py-1.5 text-left transition-colors hover:bg-winter-50 focus-visible:bg-winter-50 focus-visible:outline-none"
+                                  >
+                                    <span
+                                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors ${on ? 'text-white' : 'bg-winter-50 text-foreground/40'}`}
+                                      style={on ? { backgroundColor: c.color } : undefined}
+                                    >
+                                      <Icon className="h-4 w-4" aria-hidden />
+                                    </span>
+                                    <span className={`min-w-0 flex-1 truncate text-sm ${on ? 'font-semibold text-foreground' : 'text-foreground/55'}`}>{c.label}</span>
+                                    <span className="text-xs tabular-nums text-foreground/45">{poiCounts.get(c.id)}</span>
+                                    <SwitchKnob on={on} />
+                                  </button>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </section>
+                )}
+
+                <section>
+                  <h2 className={panelHeading}>Affichage</h2>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={snow}
+                    onClick={() => setSnow((v) => !v)}
+                    className="flex min-h-14 w-full items-center gap-3 rounded-2xl border border-winter-100 bg-card px-3 py-2 text-left transition-colors hover:bg-winter-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  >
+                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${snow ? 'bg-winter-600 text-white' : 'bg-winter-50 text-foreground/40'}`}>
+                      <Snowflake className="h-4 w-4" aria-hidden />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className={`block text-sm ${snow ? 'font-semibold text-foreground' : 'text-foreground/55'}`}>Montagnes enneigées</span>
+                      <span className="block text-xs text-foreground/55">
+                        {base === 'satellite' ? "Neige d'après l'altitude, sur la photo aérienne" : 'Sur la photo aérienne uniquement'}
+                      </span>
+                    </span>
+                    <SwitchKnob on={snow} />
+                  </button>
+                </section>
+              </div>
+            )}
+          </div>
+
+          <p className="hidden items-start gap-2 border-t border-winter-100 bg-card/80 px-4 py-2.5 sm:flex text-xs leading-snug text-foreground/55">
+            <MousePointer2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            Clic droit ou Ctrl + glisser pour pivoter. Survolez une piste pour son nom, cliquez sur un lieu pour ses infos.
           </p>
         </aside>
       )}
 
       {/* Réglages de la vue */}
       {ready && (
-        <div className={`absolute right-14 top-3 z-10 flex flex-wrap gap-2 ${panelOpen ? 'left-3 sm:left-[372px]' : 'left-3'}`}>
+        <div className={`absolute right-14 top-3 z-10 flex flex-wrap items-start gap-2 ${panelOpen ? 'left-3 sm:left-[372px]' : 'left-3'}`}>
           {!panelOpen && (
             <button type="button" onClick={() => setPanelOpen(true)} className={chip(true)}>
               <MapIcon className="h-3.5 w-3.5" /> {domain.name}
@@ -2022,6 +2371,27 @@ export default function Domain3DViewer({
           <button type="button" onClick={share} className={chip(false)} title="Partager cette vue" aria-label="Partager cette vue">
             <Share2 className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Partager</span>
           </button>
+          {/* Risque d'avalanche du jour (bulletin du massif) : ouvre l'onglet Conditions. */}
+          {live.data?.avalanche.risk ? (
+            <button
+              type="button"
+              onClick={() => {
+                setPanelOpen(true);
+                setPanelTab('conditions');
+              }}
+              className="ml-auto inline-flex items-center gap-2 rounded-2xl border border-winter-200 bg-card/95 py-1 pl-1 pr-3 text-left shadow-sm transition hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              title="Voir le bulletin avalanche"
+            >
+              <AvalancheRiskIcon risk={live.data.avalanche.risk} className="h-9 w-9" />
+              <span className="leading-tight">
+                <span className="block text-[11px] font-semibold uppercase tracking-[0.06em] text-foreground/55">Avalanche</span>
+                <span className="block text-xs font-semibold text-foreground">
+                  {live.data.avalanche.risk}/5 · {RISK_LABELS[live.data.avalanche.risk]}
+                  {live.data.demo && <span className="font-normal text-amber-700"> · simulé</span>}
+                </span>
+              </span>
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -2050,6 +2420,7 @@ export default function Domain3DViewer({
             onLevel={setRouteLevel}
             status={routeStatus}
             result={route}
+            closedCount={closedCount}
             onStart={startNavigation}
             onSimulate={startSimulation}
             onClose={closeRoute}
@@ -2143,6 +2514,7 @@ export default function Domain3DViewer({
                 <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hover.color }} />
                 <span className="font-semibold text-foreground">{hover.title}</span>
                 <span className="text-foreground/55">{hover.detail}</span>
+                {hover.live && <span className={`font-semibold ${hover.live.open ? 'text-emerald-700' : 'text-foreground/55'}`}>{hover.live.text}</span>}
               </span>
             )}
             <span className="flex items-center gap-1.5 text-foreground/55">
