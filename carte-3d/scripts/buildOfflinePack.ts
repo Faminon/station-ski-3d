@@ -35,6 +35,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import { crc32, deflateRawSync } from 'node:zlib';
 import { API_USER_AGENT } from '../src/lib/apis/http';
 import type { StationPisteMap } from '../src/lib/apis/overpass';
+import { domainDetailBounds } from '../src/lib/domainArea';
 import { REMOTE_TILES, TILE_EXT, fillTemplate, type OfflinePack, type PackArea, type TileSet } from '../src/lib/offlinePack';
 import { skiDomain } from '../src/lib/skiDomains';
 
@@ -47,7 +48,6 @@ const WIDE_ZOOMS = [5, 11] as const;
 const DETAIL_MIN_ZOOM = 12;
 /** Téléchargements simultanés : la Géoplateforme de l'IGN limite le débit par adresse. */
 const CONCURRENCY = 6;
-const METERS_PER_DEG_LAT = 110_574;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---- Options ------------------------------------------------------------------------------
@@ -85,12 +85,7 @@ if (!site && !estimateOnly) {
 
 function detailBounds(): [number, number, number, number] {
   const map = JSON.parse(readFileSync(join(ROOT, 'public', domain!.pistesUrl), 'utf8')) as StationPisteMap;
-  const { lat, lng } = map.center;
-  const mPerDegLng = 111_320 * Math.cos((lat * Math.PI) / 180);
-  const m = marginKm * 1000;
-  const { minX, maxX, minY, maxY } = map.bounds;
-  // Plan des pistes : x vers l'est, y vers le sud, en mètres autour du centre.
-  return [lng + (minX - m) / mPerDegLng, lat - (maxY + m) / METERS_PER_DEG_LAT, lng + (maxX + m) / mPerDegLng, lat - (minY - m) / METERS_PER_DEG_LAT];
+  return domainDetailBounds(map, marginKm);
 }
 
 function wideBounds(): [number, number, number, number] {

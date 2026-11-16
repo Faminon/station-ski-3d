@@ -83,6 +83,23 @@ Dans le paquet, chaque tuile vient du paquet, sinon du réseau, sinon de sa tuil
 les origines) ; sans réseau, la carte montre les dernières reçues sur l'appareil (12 h au plus).
 `?horsligne` dans l'adresse simule l'absence de réseau.
 
+## Version Three.js (essai, `/three/<domaine>`)
+
+La carte refaite avec Three.js et son moteur WebGPU (WebGL 2 à défaut, automatiquement), à
+comparer avec la carte MapLibre avant de remplacer quoi que ce soit (`src/components/three`).
+Elle reprend les mêmes données et les mêmes tuiles (paquet hors ligne compris) : relief en
+tuiles de maillage (fines sur le domaine, grossières pour l'horizon), photos IGN drapées, neige,
+roche et forêts calculées par la carte graphique (TSL), pistes et remontées, sapins instanciés
+(même plantation que MapLibre), noms des sommets et des villages, lieux (mêmes catégories,
+cochables), recherche, fiches au clic (mêmes fiches que la carte MapLibre, `MapCards.tsx`),
+« Ma position », conditions en direct (panneau et tracés fermés estompés), itinéraires et
+guidage (même réseau et même fiche que la carte MapLibre, `useRouting.ts`, simulation comprise).
+Pas encore : bâtiments, téléphériques animés, snowparks, routes, partage de la vue.
+
+Compteur en haut à gauche (moteur, images par seconde en mouvement, part sous 40, sapins,
+triangles) ; « Rotation » fait tourner la caméra pour mesurer. Réglages : `?webgl` force WebGL 2,
+`?maillage=256` affine le relief, `?aa` active l'anticrénelage.
+
 ## Code partagé avec le site de recherche
 
 Le moteur 3D (`src/components/station/`), `src/lib/apis/overpass.ts`, `pisteStats.ts`,

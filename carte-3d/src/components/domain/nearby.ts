@@ -3,7 +3,7 @@
 // Calculs en mètres dans un repère local (équirectangulaire), largement assez
 // précis à l'échelle d'un domaine skiable.
 
-import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/components/station/map3d';
+import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/lib/apis/overpass';
 
 export interface NamedLine {
   name: string;

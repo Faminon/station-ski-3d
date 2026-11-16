@@ -26,6 +26,7 @@ import { tuneMapPerformance } from './mapPerformance';
 import LivePanel, { AvalancheRiskIcon, LIVE_CLOSED_OPACITY, RISK_LABELS } from './LivePanel';
 import { POI_ICONS, SEARCH_ICONS } from './panelIcons';
 import { useLiveConditions } from './useLiveConditions';
+import { SIM_SPEEDUP, SIM_TICK_MS, headingTo, pointAhead, simPath } from './routeGeometry';
 import type { LiveConditions, LiveItemState } from '@/lib/live/types';
 import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, placeClearings, type BuiltArea } from './mountainBuildings';
 import { LIFT_3D_LAYERS, addLifts3d, type LiftsController } from '@/components/station/liftAnimation';
@@ -213,40 +214,9 @@ const FADED_WHILE_GUIDING: [string, string, unknown][] = [
   ['lift-cabins', 'fill-extrusion-opacity', 0],
   ['park-features', 'fill-extrusion-opacity', 0.3],
 ];
-/** Simulation du trajet : accélération par rapport à un vrai skieur, et cadence des positions. */
-const SIM_SPEEDUP = 8;
-const SIM_TICK_MS = 400;
-
-/** Trajet suivi par la position simulée : les points de l'itinéraire, avec la vitesse de chaque étape. */
-function simPath(route: RouteResult) {
-  return route.steps.flatMap((s) => s.coordinates.map(([lng, lat]) => ({ lng, lat, speed: s.kind === 'lift' ? 5 : s.kind === 'walk' ? 2.5 : 7 })));
-}
-
 /** Lecture et écriture de propriétés de calque nommées dynamiquement (types MapLibre trop stricts ici). */
 const getPaint = (map: MlMap, id: string, prop: string): unknown => map.getPaintProperty(id, prop as never);
 const setPaint = (map: MlMap, id: string, prop: string, value: unknown) => map.setPaintProperty(id, prop as never, value as never);
-
-/** Cap (degrés) d'un point vers un autre, pour orienter la vue dans le sens de la marche. */
-function headingTo(a: { lng: number; lat: number }, b: { lng: number; lat: number }): number {
-  const dx = (b.lng - a.lng) * Math.cos((a.lat * Math.PI) / 180);
-  const dy = b.lat - a.lat;
-  return (Math.atan2(dx, dy) * 180) / Math.PI;
-}
-
-/** Point de l'itinéraire à `meters` mètres du départ (pour viser devant le skieur). */
-function pointAhead(route: RouteResult, meters: number): { lng: number; lat: number } | null {
-  const pts = route.steps.flatMap((s) => s.coordinates);
-  let left = meters;
-  for (let i = 1; i < pts.length; i++) {
-    const [x0, y0] = pts[i - 1];
-    const [x1, y1] = pts[i];
-    const d = Math.hypot((x1 - x0) * 111_320 * Math.cos((y0 * Math.PI) / 180), (y1 - y0) * 110_574);
-    if (d >= left && d > 0) return { lng: x0 + ((x1 - x0) * left) / d, lat: y0 + ((y1 - y0) * left) / d };
-    left -= d;
-  }
-  const last = pts[pts.length - 1];
-  return last ? { lng: last[0], lat: last[1] } : null;
-}
 
 /** Ce que la fiche « Ma position » dit du skieur localisé. */
 interface Here {
