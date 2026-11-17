@@ -12,7 +12,7 @@
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FeatureCollection, Polygon } from 'geojson';
 import type { DomainPoi, DomainPoiCategoryId } from '@/lib/domainPois';
-import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/components/station/map3d';
+import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/lib/apis/overpass';
 
 export const BUILDINGS_LAYER = 'place-buildings';
 const MIN_ZOOM = 13;
@@ -61,7 +61,9 @@ export function mountainPlaces(pois: DomainPoi[], built: BuiltArea[]): DomainPoi
   });
 }
 
-type Volume = FeatureCollection<Polygon, { c: string; b: number; h: number; cat: string }>['features'][number];
+/** Volume posé sur le relief : contour, couleur `c`, bas `b` et haut `h` (m) au-dessus du sol sous son centre. */
+export type PlaceVolume = FeatureCollection<Polygon, { c: string; b: number; h: number; cat: string }>['features'][number];
+type Volume = PlaceVolume;
 
 /**
  * Outil de construction autour d'un lieu, dans un repère tourné au hasard
@@ -679,6 +681,23 @@ export function placeClearings(places: DomainPoi[]): { coordinates: number[][]; 
   return places.map((p) => ({ coordinates: [[p.lng, p.lat], [p.lng, p.lat]], halfWidth: CLEARING_M[p.category] ?? 12 }));
 }
 
+/**
+ * Volumes de tous les lieux modélisés à l'échelle `k` (1 : dimensions de référence). Partagé par
+ * la carte MapLibre (calque fill-extrusion) et la carte Three.js (src/components/three/buildings.ts).
+ */
+export function placeVolumes(places: DomainPoi[], k: number): PlaceVolume[] {
+  const nudges = toiletNudges(places);
+  const out: Volume[] = [];
+  places.forEach((p) => {
+    const nudge = nudges.get(p.id);
+    if (!nudge) return model(out, p, k);
+    // Toilettes ou poste de secours collés à un restaurant : décalés à côté de lui (terrasse comprise).
+    const d = (NUDGE_M[p.category] ?? 30) * k;
+    model(out, { ...p, lng: p.lng + (nudge[0] * d) / metersPerDegLng(p.lat), lat: p.lat + (nudge[1] * d) / METERS_PER_DEG_LAT }, k);
+  });
+  return out;
+}
+
 /** Ajoute le calque des bâtiments des lieux ; renvoie la fonction d'arrêt. */
 export function addPlaceBuildings(map: MlMap, places: DomainPoi[], beforeId?: string): () => void {
   const empty: FeatureCollection<Polygon> = { type: 'FeatureCollection', features: [] };
@@ -701,22 +720,13 @@ export function addPlaceBuildings(map: MlMap, places: DomainPoi[], beforeId?: st
     beforeId,
   );
   const source = map.getSource(BUILDINGS_LAYER) as GeoJSONSource;
-  const nudges = toiletNudges(places);
   let lastK = 0;
   const update = () => {
     if (map.getZoom() < MIN_ZOOM) return;
     const k = Math.min(MAX_SCALE, Math.max(1, 2 ** (REF_ZOOM - Math.round(map.getZoom() * 2) / 2)));
     if (k === lastK) return;
     lastK = k;
-    const out: Volume[] = [];
-    places.forEach((p) => {
-      const nudge = nudges.get(p.id);
-      if (!nudge) return model(out, p, k);
-      // Toilettes ou poste de secours collés à un restaurant : décalés à côté de lui (terrasse comprise).
-      const d = (NUDGE_M[p.category] ?? 30) * k;
-      model(out, { ...p, lng: p.lng + (nudge[0] * d) / metersPerDegLng(p.lat), lat: p.lat + (nudge[1] * d) / METERS_PER_DEG_LAT }, k);
-    });
-    source.setData({ type: 'FeatureCollection', features: out });
+    source.setData({ type: 'FeatureCollection', features: placeVolumes(places, k) });
   };
   update();
   map.on('zoomend', update);

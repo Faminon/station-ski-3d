@@ -1,26 +1,20 @@
-import type { Metadata } from 'next';
-import { notFound } from 'next/navigation';
-import ThreeClient from '@/components/three/ThreeClient';
-import { SKI_DOMAINS, skiDomain } from '@/lib/skiDomains';
+import { redirect } from 'next/navigation';
+import { SKI_DOMAINS } from '@/lib/skiDomains';
 
-// Une page par domaine, produite à la construction.
+// Ancienne adresse de la version d'essai Three.js : la carte est désormais sur /carte/<domaine>.
 export const dynamicParams = false;
 export const generateStaticParams = () => SKI_DOMAINS.map((d) => ({ domaine: d.slug }));
 
-export async function generateMetadata({ params }: { params: Promise<{ domaine: string }> }): Promise<Metadata> {
+export default async function ThreeDomainRedirect({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ domaine: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { domaine } = await params;
-  const domain = skiDomain(domaine);
-  return {
-    title: domain ? `${domain.name} en 3D (Three.js) — AltiStay` : 'Carte 3D (Three.js) — AltiStay',
-    // Version d'essai, à comparer avec la carte MapLibre (/carte/…) : pas dans les moteurs de recherche.
-    robots: { index: false, follow: false },
-  };
-}
-
-/** Carte 3D d'un domaine en Three.js (moteur WebGPU) : /three/foret-blanche. */
-export default async function ThreeDomainRoute({ params }: { params: Promise<{ domaine: string }> }) {
-  const { domaine } = await params;
-  const domain = skiDomain(domaine);
-  if (!domain) notFound();
-  return <ThreeClient domain={domain} />;
+  const query = new URLSearchParams();
+  for (const [k, v] of Object.entries(await searchParams)) for (const one of [v].flat()) if (one !== undefined) query.append(k, one);
+  const qs = query.toString();
+  redirect(`/carte/${domaine}${qs ? `?${qs}` : ''}`);
 }

@@ -1,29 +1,72 @@
 'use client';
 
-import { ArrowUpRight, CalendarOff, FlaskConical, Thermometer, TriangleAlert, Wind } from 'lucide-react';
+import { ArrowUpRight, CableCar, CalendarOff, FlaskConical, Mountain, Thermometer, TriangleAlert, Wind } from 'lucide-react';
 import type { LiveConditions, LiveSource, VigilanceColor, WeatherPoint } from '@/lib/live/types';
 import { weatherIcon } from './panelIcons';
 import type { LiveState } from './useLiveConditions';
 
-/** Couleurs européennes du risque d'avalanche (1 faible → 5 très fort). */
-const RISK_COLORS = ['', '#c5e86c', '#f5e71a', '#f59a23', '#e3271b', '#7a1712'];
 export const RISK_LABELS = ['', 'faible', 'limité', 'marqué', 'fort', 'très fort'];
 
 /**
- * Pictogramme du risque d'avalanche, de 1 à 5 : chiffre sur la couleur de l'échelle européenne,
- * au-dessus d'une silhouette de montagne. Utilisé sur la carte et dans le panneau.
+ * Pictogramme du risque d'avalanche, de 1 à 5, sur le modèle de l'échelle européenne : losange
+ * à la couleur du niveau, sommet de montagne noir enneigé, symbole du niveau (coche, « ! »,
+ * « !! », croix) et nuage aux niveaux 4 et 5 ; damier rouge et noir au niveau 5.
+ * Utilisé sur la carte et dans le panneau.
  */
 export function AvalancheRiskIcon({ risk, className = 'h-11 w-11' }: { risk: number; className?: string }) {
-  const color = RISK_COLORS[risk] ?? '#ced4da';
-  const ink = risk >= 4 ? '#ffffff' : '#1b1d22';
+  const fill = ['#ced4da', '#ccff66', '#ffff00', '#ff9900', '#ff0000', '#ff0000'][risk] ?? '#ced4da';
+  const id = `aval-${risk}`;
+  // Losange : haut (32,4), droite (60,32), bas (32,60), gauche (4,32).
+  const diamond = '32,4 60,32 32,60 4,32';
   return (
-    <svg viewBox="0 0 48 48" className={`shrink-0 ${className}`} role="img" aria-label={`Risque d'avalanche ${risk} sur 5, ${RISK_LABELS[risk] ?? ''}`}>
-      <rect x="1" y="1" width="46" height="46" rx="12" fill={color} stroke="rgb(0 0 0 / 0.12)" strokeWidth="1" />
-      <path d="M5 41 L17 24 L23 31 L30 19 L43 41 Z" fill={ink} opacity="0.18" />
-      <path d="M27.4 23.2 L30 19 L32.7 23.5 L30.6 22.6 L29.1 24.2 Z" fill="#ffffff" opacity={risk >= 4 ? 0.5 : 0.9} />
-      <text x="24" y="25" textAnchor="middle" dominantBaseline="central" fontSize="24" fontWeight="700" fill={ink} fontFamily="var(--font-fraunces), Georgia, serif">
-        {risk}
-      </text>
+    <svg viewBox="0 0 64 64" className={`shrink-0 ${className}`} role="img" aria-label={`Risque d'avalanche ${risk} sur 5, ${RISK_LABELS[risk] ?? ''}`}>
+      <defs>
+        <clipPath id={`${id}-clip`}>
+          <polygon points={diamond} />
+        </clipPath>
+        {risk === 5 && (
+          <pattern id={`${id}-check`} width="12" height="12" patternUnits="userSpaceOnUse">
+            <rect width="12" height="12" fill="#ff0000" />
+            <rect width="6" height="6" fill="#111" />
+            <rect x="6" y="6" width="6" height="6" fill="#111" />
+          </pattern>
+        )}
+      </defs>
+      <polygon points={diamond} fill={risk === 5 ? `url(#${id}-check)` : fill} />
+      <g clipPath={`url(#${id}-clip)`}>
+        {/* Sommet noir et pente enneigée. */}
+        <polygon points="32,4 52,24 45,21 39,25 33,19 26,24 20,21 12,24" fill="#111" />
+        <polygon points="33,19 39,25 45,21 52,24 54,27 44,25 38,28 32,23 26,27 18,24 20,21 26,24" fill="#fff" />
+      </g>
+      <polygon points={diamond} fill="none" stroke="#111" strokeWidth="2.5" strokeLinejoin="round" />
+      {/* Symbole du niveau. */}
+      {risk === 1 && <path d="M23 40 L30 47 L42 32" fill="none" stroke="#111" strokeWidth="4.5" strokeLinecap="round" strokeLinejoin="round" />}
+      {risk === 2 && (
+        <g fill="#111">
+          <rect x="29.5" y="29" width="5" height="13" rx="1.5" />
+          <circle cx="32" cy="47" r="2.8" />
+        </g>
+      )}
+      {risk === 3 && (
+        <g fill="#111">
+          <rect x="24.5" y="29" width="5" height="13" rx="1.5" />
+          <circle cx="27" cy="47" r="2.8" />
+          <rect x="34.5" y="29" width="5" height="13" rx="1.5" />
+          <circle cx="37" cy="47" r="2.8" />
+        </g>
+      )}
+      {risk >= 4 && (
+        <path d="M24 32 L40 48 M40 32 L24 48" stroke={risk === 5 ? '#fff' : '#111'} strokeWidth="5" strokeLinecap="round" />
+      )}
+      {/* Nuage des niveaux 4 et 5. */}
+      {risk >= 4 && (
+        <path
+          d="M45 15 a4.5 4.5 0 0 1 8.2 -2.2 a4 4 0 0 1 7 3.2 a3.4 3.4 0 0 1 -0.7 6.7 h-13.8 a3.9 3.9 0 0 1 -0.7 -7.7 z"
+          fill="#fff"
+          stroke="#555"
+          strokeWidth="1.3"
+        />
+      )}
     </svg>
   );
 }
@@ -36,8 +79,6 @@ const VIGILANCE: Record<VigilanceColor, { label: string; color: string }> = {
 
 /** Opacité d'un tracé fermé ou hors saison, sur la carte (Domain3DViewer) comme dans la légende. */
 export const LIVE_CLOSED_OPACITY = 0.45;
-/** Bleu d'un tracé ouvert dans la légende. */
-const OPEN_BLUE = '#2f6fd0';
 
 const WIND_FROM = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
 const windFrom = (deg: number | null) => (deg === null ? '' : WIND_FROM[Math.round(deg / 45) % 8]);
@@ -96,22 +137,58 @@ function ExternalButton({ href, children }: { href: string; children: React.Reac
   );
 }
 
-/** Jauge « ouvertes / total ». */
-function Meter({ label, open, total }: { label: string; open: number; total: number }) {
+/** Teinte d'un taux d'ouverture : vert (bien ouvert), ambre (en partie), gris (presque tout fermé). */
+function shareTone(share: number) {
+  if (share >= 0.6) return { bar: 'bg-emerald-500', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' };
+  if (share >= 0.25) return { bar: 'bg-amber-500', pill: 'bg-amber-50 text-amber-800 ring-amber-200' };
+  return { bar: 'bg-slate-400', pill: 'bg-slate-100 text-slate-600 ring-slate-200' };
+}
+
+/** Un chiffre « ouvertes / total » avec son icône et sa jauge. */
+function Stat({ icon: Icon, label, open, total }: { icon: typeof Mountain; label: string; open: number; total: number }) {
   const share = total ? open / total : 0;
   return (
     <div className="min-w-0 flex-1">
-      <div className="flex items-baseline justify-between gap-1 text-xs">
-        <span className="text-foreground/60">{label}</span>
-        <span className="tabular-nums font-semibold text-foreground">
-          {open}
-          <span className="font-normal text-foreground/45">/{total}</span>
-        </span>
+      <div className="flex items-center gap-1.5 text-xs text-foreground/60">
+        <Icon className="h-3.5 w-3.5 shrink-0 text-winter-600" aria-hidden />
+        {label}
       </div>
-      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-winter-100" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={total} aria-valuenow={open}>
-        <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-500" style={{ width: `${share * 100}%` }} />
+      <p className="mt-0.5 tabular-nums leading-none">
+        <span className="text-2xl font-bold text-foreground">{open}</span>
+        <span className="text-sm font-medium text-foreground/40"> / {total}</span>
+      </p>
+      <div
+        className="mt-2 h-1.5 overflow-hidden rounded-full bg-winter-100"
+        role="meter"
+        aria-label={`${label} ouvertes`}
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={open}
+      >
+        <div className={`h-full rounded-full transition-[width] duration-500 ${shareTone(share).bar}`} style={{ width: `${share * 100}%` }} />
       </div>
     </div>
+  );
+}
+
+/** Une station : son nom, la part du domaine ouverte, pistes et remontées. */
+function ResortTile({ name, pistesOpen, pistesTotal, liftsOpen, liftsTotal }: { name: string; pistesOpen: number; pistesTotal: number; liftsOpen: number; liftsTotal: number }) {
+  const total = pistesTotal + liftsTotal;
+  const share = total ? (pistesOpen + liftsOpen) / total : 0;
+  const pct = Math.round(share * 100);
+  return (
+    <li className="rounded-xl bg-winter-50/70 p-3 ring-1 ring-inset ring-winter-100">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <p className="truncate text-[15px] font-semibold text-foreground">{name}</p>
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums ring-1 ring-inset ${shareTone(share).pill}`}>
+          {pct === 0 ? 'Fermé' : `Ouvert à ${pct} %`}
+        </span>
+      </div>
+      <div className="flex gap-4">
+        <Stat icon={Mountain} label="Pistes" open={pistesOpen} total={pistesTotal} />
+        <Stat icon={CableCar} label="Remontées" open={liftsOpen} total={liftsTotal} />
+      </div>
+    </li>
   );
 }
 
@@ -129,26 +206,11 @@ function Openings({ live, stale }: { live: LiveConditions; stale: boolean }) {
               Hors saison : pistes et remontées sont estompées sur la carte.
             </p>
           )}
-          <ul className="space-y-3">
+          <ul className="space-y-2">
             {o.resorts.map((r) => (
-              <li key={r.name}>
-                <p className="mb-1.5 text-[13px] font-semibold text-foreground">{r.name}</p>
-                <div className="flex gap-4">
-                  <Meter label="Pistes" open={r.pistesOpen} total={r.pistesTotal} />
-                  <Meter label="Remontées" open={r.liftsOpen} total={r.liftsTotal} />
-                </div>
-              </li>
+              <ResortTile key={r.name} {...r} />
             ))}
           </ul>
-          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-foreground/55">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-1 w-4 rounded-full" style={{ backgroundColor: OPEN_BLUE }} /> ouverte
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-1 w-4 rounded-full" style={{ backgroundColor: OPEN_BLUE, opacity: LIVE_CLOSED_OPACITY * 0.8 }} /> fermée
-            </span>
-            <span>· survolez un tracé pour son état</span>
-          </div>
         </>
       )}
       <SourceLine source={o.source} stale={stale} />
@@ -301,8 +363,38 @@ function Weather({ live, stale }: { live: LiveConditions; stale: boolean }) {
 }
 
 /** Onglet « Conditions » du panneau du domaine : état des pistes, avalanche, vigilance, météo. */
-export default function LivePanel({ state, demo, onToggleDemo }: { state: LiveState; demo: boolean; onToggleDemo: () => void }) {
-  const { data, failed } = state;
+/** Noms des sources sans « Simulation · … » (journée simulée présentée comme une vraie). */
+const REAL_SOURCE_NAMES = { openings: 'Lumiplan (stations)', avalanche: 'Météo-France' };
+
+/**
+ * Panneau des conditions en direct. `weather` (vrai par défaut) : blocs météo et vigilance ; la
+ * carte Three.js les masque pour un panneau plus court (ouvertures et avalanche seulement).
+ * `demoNotice` (vrai par défaut) : la journée simulée est signalée (bandeau, sources, bouton pour
+ * l'activer hors saison). La carte Three.js l'efface (présentations) : la simulation ne s'y
+ * active alors que par l'adresse (?demo=saison), jamais par un bouton qu'un visiteur toucherait.
+ */
+export default function LivePanel({
+  state,
+  demo,
+  onToggleDemo,
+  weather = true,
+  demoNotice = true,
+}: {
+  state: LiveState;
+  demo: boolean;
+  onToggleDemo: () => void;
+  weather?: boolean;
+  demoNotice?: boolean;
+}) {
+  const { failed } = state;
+  const data =
+    state.data && state.data.demo && !demoNotice
+      ? {
+          ...state.data,
+          openings: { ...state.data.openings, source: { ...state.data.openings.source, name: REAL_SOURCE_NAMES.openings } },
+          avalanche: state.data.avalanche && { ...state.data.avalanche, source: { ...state.data.avalanche.source, name: REAL_SOURCE_NAMES.avalanche } },
+        }
+      : state.data;
   if (!data) {
     return (
       <p className="rounded-2xl border border-winter-100 bg-card px-4 py-3 text-[13px] text-foreground/65">
@@ -312,7 +404,7 @@ export default function LivePanel({ state, demo, onToggleDemo }: { state: LiveSt
   }
   return (
     <div className="space-y-3">
-      {data.demo && (
+      {data.demo && demoNotice && (
         <p className="flex items-start gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-[13px] leading-snug text-amber-900">
           <FlaskConical className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           <span>
@@ -323,7 +415,7 @@ export default function LivePanel({ state, demo, onToggleDemo }: { state: LiveSt
           </span>
         </p>
       )}
-      {!data.demo && !demo && data.openings.outOfSeason && (
+      {demoNotice && !data.demo && !demo && data.openings.outOfSeason && (
         <button
           type="button"
           onClick={onToggleDemo}
@@ -337,17 +429,17 @@ export default function LivePanel({ state, demo, onToggleDemo }: { state: LiveSt
         </button>
       )}
       <p className="flex items-center gap-2 px-1 text-xs text-foreground/55">
-        <span className={`h-2 w-2 rounded-full ${failed || data.demo ? 'bg-amber-500' : 'bg-emerald-500'}`} aria-hidden />
+        <span className={`h-2 w-2 rounded-full ${failed || (data.demo && demoNotice) ? 'bg-amber-500' : 'bg-emerald-500'}`} aria-hidden />
         {failed
           ? `Données de ${formatTime(data.generatedAt)} (rafraîchissement en échec)`
-          : data.demo
+          : data.demo && demoNotice
             ? `Simulation générée à ${formatTime(data.generatedAt)}`
             : `En direct · mis à jour à ${formatTime(data.generatedAt)}`}
       </p>
       <Openings live={data} stale={failed} />
-      <Weather live={data} stale={failed} />
+      {weather && <Weather live={data} stale={failed} />}
       <Avalanche live={data} stale={failed} />
-      <VigilanceCard live={data} stale={failed} />
+      {weather && <VigilanceCard live={data} stale={failed} />}
     </div>
   );
 }

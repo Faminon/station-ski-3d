@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { ArrowUp, Cable, ChevronDown, CornerUpLeft, CornerUpRight, Footprints, Loader2, LocateFixed, MapPin, Navigation, Play, Square, Undo2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowUp, Cable, ChevronDown, CornerUpLeft, CornerUpRight, Footprints, Loader2, LocateFixed, MapPin, MapPinned, Navigation, Play, Square, Undo2, X } from 'lucide-react';
 import { PISTE_COLORS, type PisteDifficulty } from '@/lib/apis/overpass';
 import type { DomainPoi } from '@/lib/domainPois';
 import type { RouteResult, RouteStep, RouteTarget, SkiLevel } from '@/lib/skiRouting';
@@ -18,6 +18,27 @@ export type RouteGoal =
   | { kind: 'place'; place: RouteTarget };
 
 export type RouteStatus = 'idle' | 'preparing' | 'none' | 'ready';
+
+/** Destination proposée par la recherche de la fiche d'itinéraire. */
+export interface DestinationHit {
+  id: string;
+  name: string;
+  sub: string;
+  emoji?: string;
+  /** Pastille de couleur (pistes). */
+  color?: string;
+}
+
+/**
+ * Recherche de destination : à la place des boutons « remontée, restaurant, station », un champ
+ * où l'on tape un nom (restaurant, remontée, piste, station…). « Toilettes » reste en bouton.
+ */
+export interface DestinationSearch {
+  search(query: string): DestinationHit[];
+  onPick(id: string): void;
+  /** Listes déroulantes par type (remontées, pistes, restaurants, stations), en plus du champ. */
+  groups?: { label: string; emoji: string; options: { id: string; name: string }[] }[];
+}
 
 const LEVELS: { id: SkiLevel; label: string }[] = [
   { id: 'all', label: 'Toutes pistes' },
@@ -51,6 +72,23 @@ function describeStep(step: RouteStep): { icon: React.ReactNode; title: string; 
     sub = 'Rejoindre le tracé suivant';
   }
   return { icon, title, sub };
+}
+
+/** Nom et pictogramme d'une destination choisie. */
+function describeGoal(goal: RouteGoal | null): { name: string; emoji: string } | null {
+  if (!goal) return null;
+  switch (goal.kind) {
+    case 'poi':
+      return { name: goal.poi.name, emoji: '📍' };
+    case 'place':
+      return { name: goal.place.name, emoji: '📍' };
+    case 'village':
+      return { name: goal.name, emoji: '🏔️' };
+    case 'lift':
+      return { name: 'Remontée la plus proche', emoji: '🚡' };
+    case 'category':
+      return goal.category === 'toilets' ? { name: 'Toilettes les plus proches', emoji: '🚻' } : { name: 'Restaurant le plus proche', emoji: '🍽️' };
+  }
 }
 
 /** Étapes à annoncer : les quelques pas d'un tracé à l'autre ne sont pas des consignes. */
@@ -90,6 +128,11 @@ export default function RouteCard({
   closedCount = 0,
   onStart,
   onSimulate,
+  simulateLabel = 'Simuler le trajet (position fictive, en accéléré)',
+  destinationSearch,
+  onClearGoal,
+  onCancelPick,
+  maxHeight,
   onClose,
 }: {
   hasStart: boolean;
@@ -111,6 +154,16 @@ export default function RouteCard({
   onStart: () => void;
   /** Essai du guidage avec une position simulée qui parcourt l'itinéraire. */
   onSimulate: () => void;
+  /** Texte du bouton de simulation du trajet. */
+  simulateLabel?: string;
+  /** Recherche de destination par nom (sinon : boutons remontée, restaurant, toilettes, station). */
+  destinationSearch?: DestinationSearch;
+  /** Efface la destination choisie (la recherche réapparaît). */
+  onClearGoal?: () => void;
+  /** Annule le choix du départ sur la carte (la fiche est alors réduite à un bandeau). */
+  onCancelPick?: () => void;
+  /** Hauteur maximale (px), quand le clavier du téléphone réduit l'écran visible. */
+  maxHeight?: number;
   onClose: () => void;
 }) {
   const pill = (active: boolean) =>
@@ -120,6 +173,33 @@ export default function RouteCard({
   const isGoal = (g: RouteGoal) =>
     !!goal && goal.kind === g.kind && (g.kind !== 'category' || (goal.kind === 'category' && goal.category === g.category));
   const steps = visibleSteps(result);
+  const [destQuery, setDestQuery] = useState('');
+  const hits = destinationSearch && destQuery.trim() ? destinationSearch.search(destQuery).slice(0, 40) : [];
+  // Résultats affichés : le champ remonte en haut de la fiche, le menu déroulant a la place dessous.
+  const destInput = useRef<HTMLInputElement>(null);
+  const destBox = useRef<HTMLDivElement>(null);
+  // Menu déroulant ouvert : il se ferme quand on touche ailleurs (le texte tapé reste).
+  const [dropOpen, setDropOpen] = useState(false);
+  const searching = dropOpen && destQuery.trim().length > 0;
+  useEffect(() => {
+    if (!searching) return;
+    const outside = (e: PointerEvent) => {
+      if (destBox.current?.contains(e.target as Node)) return;
+      setDropOpen(false);
+      destInput.current?.blur();
+    };
+    document.addEventListener('pointerdown', outside, true);
+    return () => document.removeEventListener('pointerdown', outside, true);
+  }, [searching]);
+  /** Destination choisie, affichée en gros à la place de la recherche. */
+  const goalLabel = describeGoal(goal);
+  useEffect(() => {
+    const el = destInput.current;
+    const scroller = el?.closest('.overflow-y-auto');
+    if (!el || !scroller || !searching) return;
+    const top = scroller.scrollTop + el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
+    scroller.scrollTo({ top, behavior: 'smooth' });
+  }, [searching]);
   // Repliée : seul le résumé reste visible, pour laisser voir le tracé (utile sur téléphone).
   const [folded, setFolded] = useState(false);
   const summary =
@@ -132,8 +212,25 @@ export default function RouteCard({
       </div>
     ) : null;
 
+  // Choix du départ : la fiche se baisse en un bandeau, pour laisser voir la carte ; elle remonte
+  // dès que le point est touché.
+  if (picking && onCancelPick)
+    return (
+      <div className="pointer-events-auto flex w-full max-w-md items-center gap-3 rounded-2xl border border-white/60 bg-card/95 py-2 pl-4 pr-2 text-sm shadow-xl">
+        <MapPinned className="h-5 w-5 shrink-0 text-[#e8590c]" />
+        <span className="min-w-0 flex-1 font-semibold text-foreground">Touchez la carte à l&apos;endroit du départ</span>
+        <button type="button" onClick={onCancelPick} className="shrink-0 rounded-xl px-3 py-2 text-xs font-semibold text-foreground/60 hover:bg-winter-50 hover:text-foreground">
+          Annuler
+        </button>
+      </div>
+    );
+
   return (
-    <div className="pointer-events-auto flex max-h-[48vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/60 bg-card/95 text-sm shadow-xl sm:max-h-[70vh]">
+    <div
+      // Pendant une recherche, la fiche s'agrandit pour laisser la place au menu déroulant.
+      className={`pointer-events-auto flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-white/60 bg-card/95 text-sm shadow-xl sm:max-h-[70vh] ${searching ? 'max-h-[80vh]' : 'max-h-[48vh]'}`}
+      style={maxHeight ? { maxHeight } : undefined}
+    >
       <div className="flex items-center justify-between border-b border-winter-100 px-4 py-3">
         <button type="button" onClick={() => setFolded((f) => !f)} aria-expanded={!folded} className="flex items-center gap-2 font-semibold text-foreground">
           <Navigation className="h-4 w-4 text-primary" /> Itinéraire à ski
@@ -149,12 +246,45 @@ export default function RouteCard({
           {summary ?? <span className="text-xs text-foreground/60">Afficher les réglages de l&apos;itinéraire</span>}
         </button>
       ) : (
-      <div className="space-y-3 overflow-y-auto px-4 py-3">
+      <div className="space-y-3 overflow-y-auto overscroll-contain px-4 py-3">
         {/* Départ */}
         <div>
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Départ</p>
           {picking ? (
             <p className="rounded-xl bg-winter-50 px-3 py-2 text-xs font-medium text-primary">Touchez la carte à l&apos;endroit du départ…</p>
+          ) : destinationSearch ? (
+            // Départ : la position par défaut ; petite icône à droite pour partir d'ailleurs.
+            <div className="flex items-center gap-2 rounded-xl bg-winter-50 py-1 pl-3 pr-1">
+              {startLabel === 'Ma position' ? (
+                <LocateFixed className="h-4 w-4 shrink-0 text-[#1da1f2]" />
+              ) : (
+                <MapPin className={`h-4 w-4 shrink-0 ${hasStart ? 'text-[#1da1f2]' : 'text-foreground/35'}`} />
+              )}
+              <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${hasStart ? 'text-foreground' : 'text-foreground/50'}`}>{startLabel}</span>
+              {startLabel === 'Point choisi sur la carte' ? (
+                // Point choisi : la croix l'enlève et repart de la position.
+                <button
+                  type="button"
+                  onClick={onUseGps}
+                  aria-label="Enlever le point et partir de ma position"
+                  title="Revenir à ma position"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white px-2 py-1.5 text-xs font-semibold text-foreground/70 shadow-sm hover:text-primary"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  <LocateFixed className="h-3.5 w-3.5 text-[#1da1f2]" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onPickStart}
+                  aria-label="Partir d'un autre endroit (choisir sur la carte)"
+                  title="Choisir le départ sur la carte"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#e8590c] px-2 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-[#d9480f]"
+                >
+                  <MapPinned className="h-3.5 w-3.5" /> Autre départ
+                </button>
+              )}
+            </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               {hasStart && (
@@ -177,6 +307,94 @@ export default function RouteCard({
         {/* Destination */}
         <div>
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-foreground/50">Aller vers</p>
+          {destinationSearch && goalLabel ? (
+            <div className="flex items-center gap-2.5 rounded-xl border border-primary/25 bg-primary/5 py-2 pl-3 pr-1">
+              <span className="shrink-0 text-xl leading-none">{goalLabel.emoji}</span>
+              <span className="min-w-0 flex-1 truncate font-display text-xl font-semibold leading-tight text-foreground">{goalLabel.name}</span>
+              {onClearGoal && (
+                <button type="button" onClick={onClearGoal} aria-label="Changer de destination" title="Changer de destination" className="rounded-lg p-2 text-foreground/50 hover:bg-white hover:text-foreground">
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ) : destinationSearch ? (
+            <div className="space-y-1.5">
+              <button type="button" onClick={() => onGoal({ kind: 'category', category: 'toilets' })} className={pill(isGoal({ kind: 'category', category: 'toilets' }))}>
+                🚻 Toilettes les plus proches
+              </button>
+              <div className="relative" ref={destBox}>
+              <input
+                ref={destInput}
+                value={destQuery}
+                onChange={(e) => {
+                  setDestQuery(e.target.value);
+                  setDropOpen(true);
+                }}
+                placeholder="Restaurant, remontée, piste, station…"
+                aria-label="Chercher une destination"
+                // Le champ reste visible dans la fiche quand le clavier s'ouvre.
+                onFocus={(e) => {
+                  setDropOpen(true);
+                  const el = e.currentTarget;
+                  setTimeout(() => el.scrollIntoView({ block: 'nearest' }), 300);
+                }}
+                className="h-10 w-full rounded-xl border border-winter-200 bg-white px-3 text-sm outline-none focus:border-primary/50"
+              />
+              {/* Résultats en menu déroulant sous le champ (défilement à lui, qui ne déborde pas). */}
+              {searching && hits.length > 0 && (
+                <ul className="mt-1 max-h-52 overflow-y-auto overscroll-contain rounded-xl border border-winter-200 bg-white shadow-lg">
+                  {hits.map((h) => (
+                    <li key={h.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          destinationSearch.onPick(h.id);
+                          setDestQuery('');
+                          setDropOpen(false);
+                        }}
+                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-winter-50"
+                      >
+                        {h.color ? <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: h.color }} /> : <span className="w-4 shrink-0 text-center">{h.emoji}</span>}
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-semibold text-foreground">{h.name || h.sub}</span>
+                          <span className="block truncate text-xs text-foreground/55">{h.sub}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {searching && hits.length === 0 && (
+                <p className="mt-1 rounded-xl border border-winter-200 bg-white px-3 py-2 text-xs text-foreground/55">Aucun lieu de ce nom.</p>
+              )}
+              </div>
+              {/* Ou un choix dans la liste, sans rien taper. */}
+              {!destQuery.trim() && destinationSearch.groups && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  {destinationSearch.groups
+                    .filter((g) => g.options.length)
+                    .map((g) => (
+                      <select
+                        key={g.label}
+                        value=""
+                        onChange={(e) => e.target.value && destinationSearch.onPick(e.target.value)}
+                        aria-label={g.label}
+                        className="h-10 w-full cursor-pointer appearance-none truncate rounded-xl border border-winter-200 bg-white px-3 text-xs font-semibold text-foreground/80 outline-none focus:border-primary/50"
+                      >
+                        <option value="">
+                          {g.emoji} {g.label}…
+                        </option>
+                        {g.options.map((o) => (
+                          <option key={o.id} value={o.id}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </select>
+                    ))}
+                </div>
+              )}
+            </div>
+          ) : (
           <div className="flex flex-wrap gap-1.5">
             <button type="button" onClick={() => onGoal({ kind: 'lift' })} className={pill(isGoal({ kind: 'lift' }))}>
               🚡 Remontée la plus proche
@@ -201,7 +419,8 @@ export default function RouteCard({
               ))}
             </select>
           </div>
-          {(goal?.kind === 'poi' || goal?.kind === 'place') && (
+          )}
+          {!destinationSearch && (goal?.kind === 'poi' || goal?.kind === 'place') && (
             <p className="mt-1.5 text-xs text-foreground/60">
               Vers : <span className="font-medium text-foreground">{goal.kind === 'poi' ? goal.poi.name : goal.place.name}</span>
             </p>
@@ -254,7 +473,7 @@ export default function RouteCard({
               onClick={onSimulate}
               className="mt-1.5 w-full rounded-xl border border-winter-200 px-4 py-2 text-xs font-semibold text-foreground/70 transition hover:border-primary hover:text-primary"
             >
-              Simuler le trajet (position fictive, en accéléré)
+              {simulateLabel}
             </button>
             <ol className="mt-1 divide-y divide-winter-100">
               {steps.map((s, i) => (

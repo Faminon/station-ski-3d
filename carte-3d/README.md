@@ -94,7 +94,10 @@ roche et forêts calculées par la carte graphique (TSL), pistes et remontées, 
 cochables), recherche, fiches au clic (mêmes fiches que la carte MapLibre, `MapCards.tsx`),
 « Ma position », conditions en direct (panneau et tracés fermés estompés), itinéraires et
 guidage (même réseau et même fiche que la carte MapLibre, `useRouting.ts`, simulation comprise).
-Pas encore : bâtiments, téléphériques animés, snowparks, routes, partage de la vue.
+bâtiments 3D (`buildings.ts`) : lieux modélisés (restaurants, refuges, toilettes, secours…,
+selon les catégories cochées), remontées (gares, pylônes, câbles, véhicules immobiles) et
+bâtiments réels des villages, avec les mêmes volumes que la carte MapLibre
+(`placeVolumes`, `liftVolumes`). Pas encore : modules des snowparks, routes, partage de la vue.
 
 Compteur en haut à gauche (moteur, images par seconde en mouvement, part sous 40, sapins,
 triangles) ; « Rotation » fait tourner la caméra pour mesurer. Réglages : `?webgl` force WebGL 2,

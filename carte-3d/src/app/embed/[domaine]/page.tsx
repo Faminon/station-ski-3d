@@ -1,9 +1,11 @@
 import type { Metadata } from 'next';
+import { mapViewport } from '@/lib/mapViewport';
 import DomainMapPage, { domainMapMetadata } from '@/components/domain/DomainMapPage';
 import { SKI_DOMAINS } from '@/lib/skiDomains';
 
 // Une page par domaine intégrable, produite à la construction.
 export const dynamicParams = false;
+export const viewport = mapViewport;
 export const generateStaticParams = () => SKI_DOMAINS.filter((d) => d.embed).map((d) => ({ domaine: d.slug }));
 
 export async function generateMetadata({ params }: { params: Promise<{ domaine: string }> }): Promise<Metadata> {

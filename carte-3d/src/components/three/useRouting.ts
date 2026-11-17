@@ -192,12 +192,16 @@ export function useRouting(options: {
     return () => marks.forEach((m) => m.remove());
   }, [handle, shownRoute, routeOpen, startMarker, routeLevel, navigating]);
 
-  // Guidage : la caméra suit le skieur, tournée vers la suite de l'itinéraire.
+  // Guidage : la caméra suit le skieur en continu (lissée par la scène, sans à-coups entre deux
+  // positions), tournée vers la suite de l'itinéraire.
   useEffect(() => {
     if (!handle || !navigating || !gpsStart) return;
     const ahead = shownRoute ? pointAhead(shownRoute, 200) : null;
-    handle.flyTo({ lng: gpsStart.lng, lat: gpsStart.lat, distance: 650, pitch: 58, bearing: ahead ? headingTo(gpsStart, ahead) : undefined, duration: 900 });
+    handle.follow({ lng: gpsStart.lng, lat: gpsStart.lat, bearing: ahead ? headingTo(gpsStart, ahead) : undefined });
   }, [handle, navigating, gpsStart, shownRoute]);
+  useEffect(() => {
+    if (handle && !navigating) handle.follow(null);
+  }, [handle, navigating]);
 
   // Simulation : la position avance toute seule le long de l'itinéraire figé.
   useEffect(() => {
@@ -247,8 +251,8 @@ export function useRouting(options: {
   const openRoute = (goal?: RouteGoal) => {
     setRouteOpen(true);
     if (goal) setRouteGoal(goal);
-    // Sans GPS ni départ choisi : on propose de toucher la carte.
-    if (!pickedStart && !gpsStart) setPicking(true);
+    // Départ par défaut : la position (demandée si besoin) ; un autre point se choisit depuis la fiche.
+    if (!pickedStart && !gpsStart) requestGps();
   };
   const stopNavigation = () => {
     navigatingRef.current = false;

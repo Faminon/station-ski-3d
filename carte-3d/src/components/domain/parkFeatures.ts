@@ -9,7 +9,7 @@
 
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { Feature, FeatureCollection, Polygon } from 'geojson';
-import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/components/station/map3d';
+import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/lib/apis/overpass';
 import { loadTerrain } from './terrainSampler';
 
 function pointInRing(x: number, y: number, ring: number[][]): boolean {
@@ -42,7 +42,9 @@ const RAIL = '#f08c00';
 const BOX = '#1971c2';
 const STEEL = '#495057';
 
-type Volume = Feature<Polygon, { c: string; b: number; h: number }>;
+/** Volume posé sur le relief : contour, couleur `c`, bas `b` et haut `h` (m) au-dessus du sol sous son centre. */
+export type ParkVolume = Feature<Polygon, { c: string; b: number; h: number }>;
+type Volume = ParkVolume;
 type XY = [number, number];
 
 /** Repère local d'une zone : mètres autour de son premier point. */
@@ -239,6 +241,65 @@ function layoutArea(out: Volume[], f: Frame, ring: XY[], u: XY) {
 }
 
 /**
+ * Modules de tous les snowparks de `zones` (sortie de parkZoneFeatures), alignés du haut vers le
+ * bas d'après `elevation` (altitude réelle d'un point, null si inconnue), à l'écart des remontées
+ * `lifts`. Partagé par la carte MapLibre (addParkFeatures) et la carte Three.js.
+ */
+export function parkFeatureVolumes(zones: FeatureCollection, lifts: number[][][], elevation: (lng: number, lat: number) => number | null): ParkVolume[] {
+  const kept = keptParks(zones);
+  const out: Volume[] = [];
+  for (const z of kept) {
+    const coords = z.geometry.type === 'Polygon' ? z.geometry.coordinates[0].slice(0, -1) : z.geometry.coordinates;
+    const [lng0, lat0] = coords[0];
+    const mx = metersPerDegLng(lat0);
+    // Remontées proches du parc, en repère local.
+    const near = lifts
+      .filter((l) => l.some(([lng, lat]) => Math.abs(lng - lng0) * mx < 2000 && Math.abs(lat - lat0) * METERS_PER_DEG_LAT < 2000))
+      .map((l) => l.map(([lng, lat]): XY => [(lng - lng0) * mx, (lat - lat0) * METERS_PER_DEG_LAT]));
+    const blocked = (x: number, y: number) => near.some((l) => l.some((a, i) => i > 0 && distToSegment(x, y, l[i - 1], a) < LIFT_CLEARANCE_M));
+    const f: Frame = { lng0, lat0, mx, blocked };
+    const toXY = ([lng, lat]: number[]): XY => [(lng - lng0) * f.mx, (lat - lat0) * METERS_PER_DEG_LAT];
+    const alt = (c: number[]) => elevation(c[0], c[1]) ?? 0;
+    if (z.geometry.type === 'LineString') {
+      // Tracé du parc : on le parcourt du haut vers le bas.
+      const pts = alt(coords[0]) >= alt(coords[coords.length - 1]) ? coords : [...coords].reverse();
+      layoutRun(out, f, pts.map(toXY), 26);
+    } else {
+      // Surface : on descend du point le plus haut du contour vers le plus bas.
+      const [tx, ty] = toXY(coords.reduce((a, c) => (alt(c) > alt(a) ? c : a)));
+      const [bx, by] = toXY(coords.reduce((a, c) => (alt(c) < alt(a) ? c : a)));
+      const len = Math.hypot(bx - tx, by - ty);
+      if (len < 30) continue;
+      layoutArea(out, f, coords.map(toXY), [(bx - tx) / len, (by - ty) / len]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Snowparks à équiper : un même parc est souvent décrit deux fois (surface et tracé, ou zone autour
+ * de son point) ; on garde la surface, et un seul jeu de modules par endroit.
+ */
+function keptParks(zones: FeatureCollection): Feature<Polygon | GeoJSON.LineString>[] {
+  const parks = zones.features.filter(
+    (z): z is Feature<Polygon> | Feature<GeoJSON.LineString> =>
+      (z.geometry.type === 'Polygon' || z.geometry.type === 'LineString') && z.properties?.kind === 'snowpark',
+  );
+  const polygons = parks.filter((z): z is Feature<Polygon> => z.geometry.type === 'Polygon').map((z) => z.geometry.coordinates[0]);
+  const insideAny = ([lng, lat]: number[], rings: number[][][]) => rings.some((ring) => pointInRing(lng, lat, ring));
+  const kept: Feature<Polygon | GeoJSON.LineString>[] = [];
+  const keptRings: number[][][] = [];
+  for (const z of parks) {
+    const coords = z.geometry.type === 'Polygon' ? z.geometry.coordinates[0] : z.geometry.coordinates;
+    const mid = [coords.reduce((a, c) => a + c[0], 0) / coords.length, coords.reduce((a, c) => a + c[1], 0) / coords.length];
+    if (z.geometry.type === 'LineString' ? insideAny(coords[Math.floor(coords.length / 2)], polygons) : insideAny(mid, keptRings)) continue;
+    kept.push(z);
+    if (z.geometry.type === 'Polygon') keptRings.push(z.geometry.coordinates[0]);
+  }
+  return kept;
+}
+
+/**
  * Ajoute les modules des parcs `zones` (sortie de parkZoneFeatures : surfaces et
  * tracés). Le calque est créé tout de suite (vide) pour suivre la case
  * « Snowparks » du panneau ; les modules arrivent avec les tuiles de relief.
@@ -262,24 +323,8 @@ export function addParkFeatures(map: MlMap, zones: FeatureCollection, lifts: num
     beforeId,
   );
 
-  const parks = zones.features.filter(
-    (z): z is Feature<Polygon> | Feature<GeoJSON.LineString> =>
-      (z.geometry.type === 'Polygon' || z.geometry.type === 'LineString') && z.properties?.kind === 'snowpark',
-  );
+  const parks = keptParks(zones);
   if (!parks.length) return Promise.resolve();
-  // Un même parc est souvent décrit deux fois (surface et tracé, ou zone autour de son point) :
-  // on garde la surface, et un seul jeu de modules par endroit.
-  const polygons = parks.filter((z): z is Feature<Polygon> => z.geometry.type === 'Polygon').map((z) => z.geometry.coordinates[0]);
-  const insideAny = ([lng, lat]: number[], rings: number[][][]) => rings.some((ring) => pointInRing(lng, lat, ring));
-  const kept: Feature<Polygon | GeoJSON.LineString>[] = [];
-  const keptRings: number[][][] = [];
-  for (const z of parks) {
-    const coords = z.geometry.type === 'Polygon' ? z.geometry.coordinates[0] : z.geometry.coordinates;
-    const mid = [coords.reduce((a, c) => a + c[0], 0) / coords.length, coords.reduce((a, c) => a + c[1], 0) / coords.length];
-    if (z.geometry.type === 'LineString' ? insideAny(coords[Math.floor(coords.length / 2)], polygons) : insideAny(mid, keptRings)) continue;
-    kept.push(z);
-    if (z.geometry.type === 'Polygon') keptRings.push(z.geometry.coordinates[0]);
-  }
   const all = parks.flatMap((z) => (z.geometry.type === 'Polygon' ? z.geometry.coordinates[0] : z.geometry.coordinates));
   const bbox: [number, number, number, number] = [
     Math.min(...all.map((c) => c[0])),
@@ -290,33 +335,7 @@ export function addParkFeatures(map: MlMap, zones: FeatureCollection, lifts: num
 
   return loadTerrain(bbox)
     .then((terrain) => {
-      const out: Volume[] = [];
-      for (const z of kept) {
-        const coords = z.geometry.type === 'Polygon' ? z.geometry.coordinates[0].slice(0, -1) : z.geometry.coordinates;
-        const [lng0, lat0] = coords[0];
-        const mx = metersPerDegLng(lat0);
-        // Remontées proches du parc, en repère local.
-        const near = lifts
-          .filter((l) => l.some(([lng, lat]) => Math.abs(lng - lng0) * mx < 2000 && Math.abs(lat - lat0) * METERS_PER_DEG_LAT < 2000))
-          .map((l) => l.map(([lng, lat]): XY => [(lng - lng0) * mx, (lat - lat0) * METERS_PER_DEG_LAT]));
-        const blocked = (x: number, y: number) =>
-          near.some((l) => l.some((a, i) => i > 0 && distToSegment(x, y, l[i - 1], a) < LIFT_CLEARANCE_M));
-        const f: Frame = { lng0, lat0, mx, blocked };
-        const toXY = ([lng, lat]: number[]): XY => [(lng - lng0) * f.mx, (lat - lat0) * METERS_PER_DEG_LAT];
-        const alt = (c: number[]) => terrain.elevation(c[0], c[1]) ?? 0;
-        if (z.geometry.type === 'LineString') {
-          // Tracé du parc : on le parcourt du haut vers le bas.
-          const pts = alt(coords[0]) >= alt(coords[coords.length - 1]) ? coords : [...coords].reverse();
-          layoutRun(out, f, pts.map(toXY), 26);
-        } else {
-          // Surface : on descend du point le plus haut du contour vers le plus bas.
-          const [tx, ty] = toXY(coords.reduce((a, c) => (alt(c) > alt(a) ? c : a)));
-          const [bx, by] = toXY(coords.reduce((a, c) => (alt(c) < alt(a) ? c : a)));
-          const len = Math.hypot(bx - tx, by - ty);
-          if (len < 30) continue;
-          layoutArea(out, f, coords.map(toXY), [(bx - tx) / len, (by - ty) / len]);
-        }
-      }
+      const out = parkFeatureVolumes(zones, lifts, terrain.elevation);
       const source = map.getSource(PARK_FEATURES_LAYER) as GeoJSONSource | undefined;
       source?.setData({ type: 'FeatureCollection', features: out });
     })

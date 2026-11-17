@@ -239,14 +239,9 @@ export function pisteGeoJson(map: StationPisteMap) {
   };
 }
 
-// Teintes de façades alpines (bois, pierre, crépis), choisies de façon stable
-// d'après la forme du bâtiment.
-const FACADE_COLORS = ['#c9a27e', '#b98b62', '#d8c3a5', '#e8dcc6', '#a9a39a', '#cfc6b8', '#d9b48f', '#bfa58a'];
-
-export function facadeColor(ring: [number, number][]): string {
-  const seed = Math.abs(Math.round((ring[0][0] + ring[0][1]) * 1e5) + ring.length);
-  return FACADE_COLORS[seed % FACADE_COLORS.length];
-}
+// Teintes de façades alpines (bois, pierre, crépis), choisies de façon stable d'après la forme
+// du bâtiment : voir facade.ts (partagé avec la carte Three.js).
+export { facadeColor } from './facade';
 
 export function supportsWebGL(): boolean {
   try {

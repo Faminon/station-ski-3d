@@ -20,7 +20,7 @@ const STEP_M = 15;
 const LIFT_OFF_M = 6;
 export const LIFT_COLOR = '#2b2f36';
 /** Tracé fermé : couleur mêlée de blanc (même effet que l'opacité réduite de la carte MapLibre). */
-const CLOSED_FADE = 0.62;
+const CLOSED_FADE = 0.55;
 
 /** Plan des pistes (mètres autour de son centre, y vers le sud) → longitude, latitude. */
 export function pisteLngLat(map: StationPisteMap) {
@@ -48,64 +48,66 @@ function drape(points: [number, number][], ground: Ground, out: number[]) {
   }
 }
 
-/** Câble d'une remontée : droit entre les gares, jamais sous le relief. */
-function cable(points: [number, number][], ground: Ground, out: number[]) {
-  const [ax, az] = points[0];
-  const [bx, bz] = points[points.length - 1];
-  const ya = ground(ax, az) + 10;
-  const yb = ground(bx, bz) + 10;
-  const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / STEP_M));
-  let prev: number[] | null = null;
-  for (let s = 0; s <= steps; s++) {
-    const t = s / steps;
-    const x = ax + (bx - ax) * t;
-    const z = az + (bz - az) * t;
-    const p = [x, Math.max(ya + (yb - ya) * t, ground(x, z) + LIFT_OFF_M), z];
-    if (prev) out.push(...prev, ...p);
-    prev = p;
-  }
-}
-
 export const trackColor = (t: TrackLine) => (t.kind === 'lift' ? LIFT_COLOR : (PISTE_COLORS[t.detail as PisteDifficulty] ?? PISTE_COLORS.unknown));
 
 /** Un ensemble de tracés : positions, et pour chaque tracé, ses segments (début, fin). */
 interface TrackSet {
   mesh: LineSegments2;
+  casing: LineSegments2;
   geometry: LineSegmentsGeometry;
   ranges: [number, number][];
   tracks: TrackLine[];
 }
 
-function buildSet(tracks: TrackLine[], toXZ: (c: number[]) => [number, number], ground: Ground, width: number): TrackSet {
+/**
+ * Tracés d'un ensemble, avec leur liseré blanc translucide (comme la carte MapLibre : sans lui,
+ * des couleurs pures et non éclairées sur la neige ombrée paraissent fluorescentes).
+ */
+function buildSet(tracks: TrackLine[], toXZ: (c: number[]) => [number, number], ground: Ground, width: number, casingOpacity: number): TrackSet {
   const positions: number[] = [];
   const ranges: [number, number][] = [];
   for (const t of tracks) {
     const start = positions.length;
     const pts = t.coordinates.map(toXZ);
-    if (pts.length >= 2) (t.kind === 'lift' ? cable : drape)(pts, ground, positions);
+    // Remontées comme pistes : trait au sol ; câbles, pylônes et gares en 3D (buildings.ts).
+    if (pts.length >= 2) drape(pts, ground, positions);
     ranges.push([start, positions.length]);
   }
   const geometry = new LineSegmentsGeometry();
   geometry.setPositions(positions);
-  const material = new THREE.Line2NodeMaterial({ color: '#ffffff', linewidth: width, worldUnits: false, vertexColors: true });
+  // `transparent` : trait et liseré dans la même passe (Three dessine toujours les objets
+  // translucides après les opaques), où `renderOrder` met le liseré dessous.
+  const material = new THREE.Line2NodeMaterial({ color: '#ffffff', linewidth: width, worldUnits: false, vertexColors: true, transparent: true });
   const mesh = new LineSegments2(geometry, material);
-  // Dessinés après le relief.
+  // Dessinés après le relief, le liseré d'abord (sans écrire la profondeur : il ne masque pas le trait).
   mesh.renderOrder = 1;
-  const set = { mesh, geometry, ranges, tracks };
+  const casing = new LineSegments2(
+    geometry,
+    new THREE.Line2NodeMaterial({ color: '#ffffff', linewidth: width + 2.2, worldUnits: false, transparent: true, opacity: casingOpacity, depthWrite: false }),
+  );
+  casing.renderOrder = 0.5;
+  const set = { mesh, casing, geometry, ranges, tracks };
   paint(set, () => false);
   return set;
 }
 
-/** Couleur de chaque tracé, estompée s'il est fermé ; tout en gris pâle pendant le guidage. */
+/**
+ * Couleur de chaque tracé, estompée s'il est fermé ; tout en gris pâle pendant le guidage.
+ * Les mélanges se font en sRGB, comme l'opacité de la carte MapLibre (en linéaire, le blanc
+ * l'emporte trop vite et donne des teintes pastel criardes).
+ */
 function paint(set: TrackSet, closed: (t: TrackLine) => boolean, faded = false) {
   const total = set.ranges.length ? set.ranges[set.ranges.length - 1][1] : 0;
   const colors = new Float32Array(total);
   const c = new THREE.Color();
-  const white = new THREE.Color('#ffffff');
+  const white = new THREE.Color(1, 1, 1);
   set.tracks.forEach((t, i) => {
-    c.set(faded ? '#9aa1a8' : trackColor(t));
+    c.set(faded ? '#9aa1a8' : trackColor(t)).convertLinearToSRGB();
+    // Teintes un peu adoucies : le trait n'est pas éclairé, le relief si.
+    if (!faded) c.offsetHSL(0, -0.08, -0.03);
     if (faded) c.lerp(white, 0.45);
     else if (closed(t)) c.lerp(white, CLOSED_FADE);
+    c.convertSRGBToLinear();
     const [a, b] = set.ranges[i];
     for (let k = a; k < b; k += 3) colors.set([c.r, c.g, c.b], k);
   });
@@ -126,9 +128,10 @@ export function buildTrackLayer(frame: Frame, elev: Elevation, tracks: { pistes:
   const toXZ = (c: number[]) => frame.toXZ(c[0], c[1]);
   const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
   const group = new THREE.Group();
-  const pistes = buildSet(tracks.pistes, toXZ, ground, 3);
-  const lifts = buildSet(tracks.lifts, toXZ, ground, 2);
-  group.add(pistes.mesh, lifts.mesh);
+  // Mêmes proportions que la carte MapLibre : liseré marqué pour les pistes, discret pour les remontées.
+  const pistes = buildSet(tracks.pistes, toXZ, ground, 2.6, 0.75);
+  const lifts = buildSet(tracks.lifts, toXZ, ground, 1.8, 0.35);
+  group.add(pistes.casing, pistes.mesh, lifts.casing, lifts.mesh);
 
   let highlight: THREE.Object3D[] = [];
   let closedPistes = new Set<number>();
@@ -161,7 +164,7 @@ export function buildTrackLayer(frame: Frame, elev: Elevation, tracks: { pistes:
       const positions: number[] = [];
       for (const t of list) {
         const pts = t.coordinates.map(toXZ);
-        if (pts.length >= 2) (t.kind === 'lift' ? cable : drape)(pts, ground, positions);
+        if (pts.length >= 2) drape(pts, ground, positions);
       }
       // Liseré blanc, puis le tracé épaissi dans sa couleur.
       for (const [color, width, order] of [
@@ -219,7 +222,7 @@ export function buildRouteLayer(frame: Frame, elev: Elevation): RouteLayer {
         const start = positions.length;
         const pts = s.coordinates.map(toXZ);
         if (pts.length < 2) continue;
-        (s.kind === 'lift' ? cable : drape)(pts, ground, positions);
+        drape(pts, ground, positions);
         c.set(
           guiding
             ? s.kind === 'piste'
@@ -261,4 +264,67 @@ export function buildPeakLabels(frame: Frame, elev: Elevation, map: StationPiste
     group.add(label);
   }
   return group;
+}
+
+// ---- Routes ------------------------------------------------------------------------------
+
+/** Routes par classe, comme la carte MapLibre : couleur, épaisseur (px) ; liseré crème. */
+const ROAD_STYLE: Record<string, { color: string; width: number }> = {
+  major: { color: '#7c6a58', width: 2.6 },
+  road: { color: '#8f8478', width: 2 },
+  street: { color: '#a39d95', width: 1.5 },
+};
+
+export interface RoadLayer {
+  group: THREE.Group;
+  /** Rues des villages : seulement de près (la carte MapLibre les montre dès le zoom 12,5). */
+  streets: THREE.Object3D[];
+  /** Numéros des grandes routes (D902…) : un point par tronçon assez long. */
+  refs: { lng: number; lat: number; ref: string }[];
+}
+
+/** Routes posées sur le relief, sous les pistes (même ordre de dessin que la carte MapLibre). */
+export function buildRoadLayer(frame: Frame, elev: Elevation, roads: GeoJSON.FeatureCollection): RoadLayer {
+  const toXZ = (c: number[]) => frame.toXZ(c[0], c[1]);
+  const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
+  const byClass = new Map<string, number[]>();
+  const refs: RoadLayer['refs'] = [];
+  const lastRef = new Map<string, [number, number]>();
+  for (const f of roads.features) {
+    const lines = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.type === 'MultiLineString' ? f.geometry.coordinates : [];
+    const cls = String(f.properties?.cls ?? 'road');
+    const list = byClass.get(cls) ?? [];
+    for (const coords of lines) {
+      if (coords.length >= 2) drape(coords.map(toXZ), ground, list);
+      // Numéro de route : au milieu du tronçon, pas plus d'un tous les 3 km pour le même numéro.
+      const ref = f.properties?.ref;
+      if (ref && coords.length >= 2) {
+        const [lng, lat] = coords[Math.floor(coords.length / 2)];
+        const prev = lastRef.get(ref);
+        if (!prev || Math.hypot((prev[0] - lng) * 79_000, (prev[1] - lat) * 111_000) > 3000) {
+          refs.push({ lng, lat, ref: String(ref) });
+          lastRef.set(ref, [lng, lat]);
+        }
+      }
+    }
+    byClass.set(cls, list);
+  }
+  const group = new THREE.Group();
+  const streets: THREE.Object3D[] = [];
+  for (const [cls, positions] of byClass) {
+    if (!positions.length) continue;
+    const style = ROAD_STYLE[cls] ?? ROAD_STYLE.road;
+    const geometry = new LineSegmentsGeometry();
+    geometry.setPositions(positions);
+    const casing = new LineSegments2(
+      geometry,
+      new THREE.Line2NodeMaterial({ color: '#fdfbf7', linewidth: style.width + 2, worldUnits: false, transparent: true, opacity: 0.85, depthWrite: false }),
+    );
+    casing.renderOrder = 0.2;
+    const line = new LineSegments2(geometry, new THREE.Line2NodeMaterial({ color: style.color, linewidth: style.width, worldUnits: false, transparent: true }));
+    line.renderOrder = 0.3;
+    group.add(casing, line);
+    if (cls === 'street') streets.push(casing, line);
+  }
+  return { group, streets, refs };
 }

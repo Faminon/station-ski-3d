@@ -13,7 +13,7 @@
 
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { Feature, FeatureCollection, Polygon } from 'geojson';
-import { METERS_PER_DEG_LAT, metersPerDegLng } from './map3d';
+import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/lib/apis/overpass';
 
 /** Calques ajoutés à la carte, à masquer avec les remontées. */
 export const LIFT_3D_LAYERS = ['lift-structures', 'lift-cabins'];
@@ -78,7 +78,9 @@ interface Lift {
   bbox: [number, number, number, number];
 }
 
-type Volume = Feature<Polygon, { c: string; b: number; h: number }>;
+/** Volume posé sur le relief : contour, couleur `c`, bas `b` et haut `h` (m) au-dessus du sol sous son centre. */
+export type LiftVolume = Feature<Polygon, { c: string; b: number; h: number }>;
+type Volume = LiftVolume;
 
 /** Dimensions à l'échelle courante : `k` pour les longueurs au sol, `kv` (plus modéré) pour les hauteurs. */
 interface Scale {
@@ -92,10 +94,16 @@ interface Scale {
 
 function scaleFor(zoom: number): Scale {
   // Par quarts de zoom : les volumes fixes ne sont recalculés qu'à ces paliers.
-  const k = Math.min(MAX_SCALE, Math.max(1, 2 ** (REF_ZOOM - Math.round(zoom * 4) / 4)));
+  return scaleOf(Math.min(MAX_SCALE, Math.max(1, 2 ** (REF_ZOOM - Math.round(zoom * 4) / 4))));
+}
+
+function scaleOf(k: number): Scale {
   const kv = Math.sqrt(k);
   return { k, kv, H: 15 * kv, off: 3.5 * k };
 }
+
+/** Hauteur des câbles au-dessus du sol (m) à l'échelle `k` : télésièges et cabines, ou tire-fesses. */
+export const cableHeight = (liftType: string, k: number) => (KINDS[liftType] === 'drag' ? 7 : 15) * Math.sqrt(k);
 
 function hash(s: string): number {
   let h = 2166136261;
@@ -150,11 +158,22 @@ function pointAt(l: Lift, d: number) {
 }
 
 /**
+ * Pavé d'un véhicule, pour la carte Three.js (instanciation) : centre [lng, lat], direction de
+ * montée (est, nord), demi-longueur et demi-largeur, bas et haut au-dessus du sol (m), couleur.
+ */
+export type BoxSink = (lng: number, lat: number, ux: number, uy: number, along: number, across: number, b: number, h: number, c: string) => void;
+
+/**
  * Volume rectangulaire centré en (x, y), orienté selon la direction (ux, uy).
  * `along` et `across` sont des demi-dimensions ; `b` et `h`, les hauteurs du
- * bas et du haut au-dessus du sol.
+ * bas et du haut au-dessus du sol. Avec une fonction à la place de `out`, le pavé lui est
+ * passé tel quel au lieu d'être converti en contour.
  */
-function box(out: Volume[], l: Lift, x: number, y: number, ux: number, uy: number, along: number, across: number, b: number, h: number, c: string) {
+function box(out: Volume[] | BoxSink, l: Lift, x: number, y: number, ux: number, uy: number, along: number, across: number, b: number, h: number, c: string) {
+  if (typeof out === 'function') {
+    out(l.lng0 + x / l.mx, l.lat0 + y / METERS_PER_DEG_LAT, ux, uy, along, across, b, h, c);
+    return;
+  }
   // (uy, -ux) : à droite du sens de la montée.
   const corner = (sa: number, sr: number) => [
     l.lng0 + (x + ux * along * sa + uy * across * sr) / l.mx,
@@ -239,7 +258,7 @@ function ease(t: number): number {
 }
 
 /** Volumes animés : position de chaque véhicule après `travel` mètres de câble parcourus. */
-function addVehicles(out: Volume[], l: Lift, scale: Scale, travel: number) {
+function addVehicles(out: Volume[] | BoxSink, l: Lift, scale: Scale, travel: number) {
   const s = l.kind === 'drag' ? dragScale(scale) : scale;
   const { k, kv, H, off } = s;
 
@@ -316,6 +335,42 @@ function vehicleCost(l: Lift, k: number): number {
 }
 
 const collection = (features: Volume[]): FeatureCollection<Polygon> => ({ type: 'FeatureCollection', features });
+
+/** Remontées préparées une fois (tracé en mètres, couleur, phase), par ligne d'origine. */
+const prepared = new WeakMap<LiftLine, Lift | null>();
+const preparedLift = (line: LiftLine) => {
+  if (!prepared.has(line)) prepared.set(line, prepare([line])[0] ?? null);
+  return prepared.get(line)!;
+};
+
+/**
+ * Véhicules des remontées, animés (carte Three.js) : chaque pavé est passé à `sink`, la remontée
+ * `i` ayant parcouru `travelOf(i)` mètres de câble. Même placement que les véhicules immobiles.
+ */
+export function liftVehicleBoxes(lines: LiftLine[], k: number, travelOf: (i: number) => number, sink: BoxSink) {
+  const s = scaleOf(k);
+  lines.forEach((line, i) => {
+    const l = preparedLift(line);
+    if (l) addVehicles(sink, l, s, travelOf(i));
+  });
+}
+
+/**
+ * Volumes de toutes les remontées à l'échelle `k`, immobiles : gares, pylônes, câbles (`structures`)
+ * et véhicules. `elevation` : altitude du sol tel que dessiné. Carte Three.js
+ * (src/components/three/buildings.ts) ; la carte MapLibre fait de même par remontée visible.
+ */
+export function liftVolumes(lines: LiftLine[], k: number, elevation: (lng: number, lat: number) => number | null): { structures: LiftVolume[]; vehicles: LiftVolume[] } {
+  const s = scaleOf(k);
+  const structures: Volume[] = [];
+  const vehicles: Volume[] = [];
+  const at: Elevation = (l, x, y) => elevation(l.lng0 + x / l.mx, l.lat0 + y / METERS_PER_DEG_LAT);
+  for (const l of prepare(lines)) {
+    addStructures(structures, l, s, at);
+    addVehicles(vehicles, l, s, 0);
+  }
+  return { structures, vehicles };
+}
 
 export interface LiftsController {
   /** À appeler avant `map.remove()`. */

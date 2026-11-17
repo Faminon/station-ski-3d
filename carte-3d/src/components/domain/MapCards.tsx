@@ -173,9 +173,9 @@ export function TrackCard({
   // Motif d'une fermeture : message de la station, sinon l'état précis (« En attente : vent »).
   const reason = status === 'closed' ? (state?.message ?? (state && state.label !== 'Fermée' ? state.label : undefined)) : state?.message;
   return (
-    <div className="relative w-[280px] p-4">
+    <div className="relative w-[300px] p-4">
       <CloseButton onClose={onClose} />
-      <div className="flex items-start gap-3 pr-8">
+      <div className="flex items-start gap-3">
         {kind === 'piste' ? (
           <SkierBadge color={color} />
         ) : (
@@ -188,31 +188,31 @@ export function TrackCard({
           </span>
         )}
         <div className="min-w-0">
-          <h3 className="font-display text-lg leading-tight text-foreground">{name}</h3>
-          {kind === 'piste' ? (
-            <span
-              className="mt-1 inline-flex items-center rounded-full border-[1.5px] px-2.5 py-0.5 text-[13px] font-semibold"
-              style={{ borderColor: color, color, backgroundColor: `${color}14` }}
-            >
-              {typeLabel}
-            </span>
-          ) : (
-            <p className="mt-0.5 text-[13px] text-foreground/55">{typeLabel}</p>
-          )}
+          <h3 className="pr-8 font-display text-lg leading-tight text-foreground">{name}</h3>
+          {/* Type (« Piste rouge », « Télésiège ») et état (ouverte, fermée…) sur une même ligne. */}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {kind === 'piste' ? (
+              <span
+                className="inline-flex items-center rounded-full border-[1.5px] px-2.5 py-0.5 text-[13px] font-semibold"
+                style={{ borderColor: color, color, backgroundColor: `${color}14` }}
+              >
+                {typeLabel}
+              </span>
+            ) : (
+              <span className="text-[13px] text-foreground/55">{typeLabel}</span>
+            )}
+            {style && label ? (
+              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[13px] font-semibold ring-1 ${style.className}`}>
+                <style.icon className="h-3.5 w-3.5" aria-hidden /> {label}
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full bg-winter-50 px-2 py-0.5 text-xs text-foreground/60 ring-1 ring-winter-200">
+                {liveAvailable ? 'État non communiqué' : 'État indisponible'}
+              </span>
+            )}
+            {demo && <span className="text-xs font-semibold text-amber-700">simulé</span>}
+          </div>
         </div>
-      </div>
-
-      <div className="mt-3">
-        {style && label ? (
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] font-semibold ring-1 ${style.className}`}>
-            <style.icon className="h-4 w-4" aria-hidden /> {label}
-          </span>
-        ) : (
-          <span className="inline-flex items-center rounded-full bg-winter-50 px-2.5 py-1 text-[13px] text-foreground/60 ring-1 ring-winter-200">
-            {liveAvailable ? 'État non communiqué par la station' : 'État en direct indisponible'}
-          </span>
-        )}
-        {demo && <span className="ml-1.5 text-xs font-semibold text-amber-700">simulé</span>}
       </div>
 
       {reason && (
@@ -223,16 +223,22 @@ export function TrackCard({
       )}
 
       <ul className="mt-3 space-y-2 border-t border-winter-100 pt-3">
-        <InfoRow icon={Ruler}>{length >= 1000 ? `${(length / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} km` : `${Math.round(length)} m`}</InfoRow>
-        {state?.grooming && <InfoRow icon={Tractor}>{state.grooming}</InfoRow>}
+        {/* Longueur et damage sur une même ligne : fiche plus courte. */}
+        <li className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] leading-snug text-foreground/75">
+          <span className="inline-flex items-center gap-2.5">
+            <Ruler className="h-4 w-4 shrink-0 text-foreground/45" aria-hidden />
+            {length >= 1000 ? `${(length / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} km` : `${Math.round(length)} m`}
+          </span>
+          {state?.grooming && (
+            <span className="inline-flex items-center gap-2">
+              <Tractor className="h-4 w-4 shrink-0 text-foreground/45" aria-hidden />
+              {state.grooming}
+            </span>
+          )}
+        </li>
         {state?.hours && <InfoRow icon={Clock}>{state.hours}</InfoRow>}
       </ul>
 
-      {status === 'closed' && (
-        <p className="mt-3 text-xs text-foreground/55">
-          {kind === 'piste' ? 'Les itinéraires évitent cette piste tant qu’elle est fermée.' : 'Les itinéraires évitent cette remontée tant qu’elle est fermée.'}
-        </p>
-      )}
       <GoButton onClick={onGo} label={goLabel} />
     </div>
   );

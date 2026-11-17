@@ -26,6 +26,7 @@ import { tuneMapPerformance } from './mapPerformance';
 import LivePanel, { AvalancheRiskIcon, LIVE_CLOSED_OPACITY, RISK_LABELS } from './LivePanel';
 import { POI_ICONS, SEARCH_ICONS } from './panelIcons';
 import { useLiveConditions } from './useLiveConditions';
+import { useMapGestures } from './useMapGestures';
 import { SIM_SPEEDUP, SIM_TICK_MS, headingTo, pointAhead, simPath } from './routeGeometry';
 import type { LiveConditions, LiveItemState } from '@/lib/live/types';
 import { BUILDINGS_LAYER, addPlaceBuildings, mountainPlaces, placeClearings, type BuiltArea } from './mountainBuildings';
@@ -400,6 +401,7 @@ export default function Domain3DViewer({
   /** Carte intégrée au site d'une station (iframe) : les liens vers AltiStay s'ouvrent dans un nouvel onglet. */
   embedded?: boolean;
 }) {
+  useMapGestures();
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
   const boundsRef = useRef<LngLatBounds | null>(null);

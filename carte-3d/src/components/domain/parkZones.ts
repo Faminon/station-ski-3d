@@ -4,7 +4,7 @@
 
 import type { FeatureCollection } from 'geojson';
 import type { DomainPoi, ParkZone } from '@/lib/domainPois';
-import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/components/station/map3d';
+import { METERS_PER_DEG_LAT, metersPerDegLng } from '@/lib/apis/overpass';
 
 export const PARK_COLORS = { snowpark: '#f76707', playground: '#fab005' } as const;
 /** Rayon de la zone dessinée autour d'un snowpark connu seulement par un point. */

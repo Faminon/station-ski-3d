@@ -9,6 +9,7 @@
 // relief du domaine (128 mailles par tuile par défaut), ?aa active l'anticrénelage.
 
 import * as THREE from 'three/webgpu';
+import { color, mix, normalWorld, smoothstep } from 'three/tsl';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
 import { domainDetailBounds } from '@/lib/domainArea';
@@ -17,8 +18,14 @@ import type { DomainData, TrackLine } from './domainData';
 import { loadElevation } from './elevation';
 import { buildForest, type Forest } from './forest';
 import { EXAGGERATION, makeFrame, tilesCovering } from './geo';
-import { buildPeakLabels, buildRouteLayer, buildTrackLayer, type RouteStepLine } from './overlays';
-import { buildChunk, winter, type Chunk } from './terrain';
+import { buildPeakLabels, buildRoadLayer, buildRouteLayer, buildTrackLayer, type RouteStepLine } from './overlays';
+import { buildChunk, parksShown, winter, type Chunk } from './terrain';
+import { installTouchGestures } from './touchGestures';
+import { parkLabelPoints, parkOverlay } from './parks';
+import { parkZoneFeatures } from '@/components/domain/parkZones';
+import { parkFeatureVolumes } from '@/components/domain/parkFeatures';
+import { buildLiftMesh, buildLiftVehicles, buildPlaceMeshes, buildVolumeMesh, loadVillageMesh } from './buildings';
+import { mountainPlaces, placeClearings } from '@/components/domain/mountainBuildings';
 
 export interface SceneStats {
   backend: string;
@@ -69,12 +76,22 @@ export interface SceneHandle {
   overview(): void;
   /** Point de la carte → écran (px dans le conteneur), ou null s'il est derrière la caméra. */
   project(lng: number, lat: number, lift?: number): { x: number; y: number } | null;
-  /** Étiquette HTML posée sur le relief ; masquée au-delà de `maxDistance` (m) de la caméra. */
-  addLabel(el: HTMLElement, lng: number, lat: number, options?: { lift?: number; maxDistance?: number; anchorBottom?: boolean }): LabelHandle;
+  /**
+   * Étiquette HTML posée sur le relief ; masquée au-delà de `maxDistance` (m) de la caméra.
+   * `smooth` : glisse vers chaque nouvelle position au lieu d'y sauter (position GPS).
+   */
+  addLabel(el: HTMLElement, lng: number, lat: number, options?: { lift?: number; maxDistance?: number; anchorBottom?: boolean; smooth?: boolean }): LabelHandle;
+  /**
+   * Guidage : la caméra suit ce point en continu, en douceur (sans à-coups entre deux positions
+   * GPS), tournée selon `bearing` ; null arrête le suivi. Un geste sur la carte le suspend un moment.
+   */
+  follow(target: { lng: number; lat: number; bearing?: number } | null): void;
   setClosedTracks(pistes: Set<number>, lifts: Set<number>): void;
   setHighlight(tracks: TrackLine[] | null): void;
   /** Itinéraire affiché (ou rien) ; en guidage, le reste du domaine est grisé. */
   setRoute(steps: RouteStepLine[] | null, guiding: boolean): void;
+  /** Catégories de lieux cochées : leurs bâtiments 3D sont affichés. */
+  setPlaceCategories(categories: Set<string>): void;
   /** Altitude réelle (m) d'un point, null hors des tuiles chargées (réseau des itinéraires). */
   elevation(lng: number, lat: number): number | null;
   /** Clic (ou toucher) sur le relief, sans glisser. */
@@ -84,15 +101,45 @@ export interface SceneHandle {
   dispose(): void;
 }
 
-const SKY = '#cfe6f8';
+const SKY = '#7fb8e6';
 const FOG = '#e4f1fb';
 /** Cadre autour du centre : même étendue que la carte MapLibre (maxBounds), un peu réduite. */
 const WIDE_LNG = 0.5;
 const WIDE_LAT = 0.35;
+/**
+ * Horizon : un anneau de relief très grossier bien plus large (~250 × 260 km), noyé dans le
+ * brouillard. Où que soit la caméra (bornée, voir constrainView), le bord du monde est toujours
+ * plus loin que la fin du brouillard : on ne voit jamais le vide.
+ */
+const HORIZON_LNG = 1.6;
+const HORIZON_LAT = 1.2;
+/** Brouillard : début et fin (m). Le ciel se fond dans la même couleur à l'horizon. */
+const FOG_NEAR = 20_000;
+const FOG_FAR = 55_000;
+/** Point visé : au plus à cette distance de la zone détaillée du domaine (m). */
+const TARGET_MARGIN = 4000;
+/** Caméra : au plus à cette distance du centre, à l'horizontale (m). */
+const CAMERA_RADIUS = 30_000;
 /** Altitude minimale de la caméra au-dessus du sol (m). */
 const CAMERA_CLEARANCE = 80;
-const OVERVIEW_DISTANCE = 19_000;
+const OVERVIEW_DISTANCE = 15_000;
+/** Recul maximal (m) sur un écran en hauteur : on voit tout juste Risoul et Vars les Claux ensemble. */
+const MAX_DISTANCE = 16_000;
+/**
+ * Sur un écran en largeur (ordinateur), on voit plus large à la même distance : le recul est
+ * réduit d'autant, pour que la plus grande étendue visible reste celle d'un téléphone.
+ */
+const aspectFactor = (aspect: number) => 1 / Math.max(1, aspect);
 const OVERVIEW_PITCH = 52;
+
+/** Vue du guidage : caméra proche, derrière le skieur. */
+const FOLLOW_DISTANCE = 650;
+const FOLLOW_PITCH = 58;
+/** Temps de réponse du lissage (s) : position de la caméra et du repère, puis cap. */
+const SMOOTH_POSITION_S = 0.6;
+const SMOOTH_BEARING_S = 0.9;
+/** Après un geste sur la carte pendant le guidage, la caméra reprend le suivi au bout de… (ms). */
+const FOLLOW_RESUME_MS = 6000;
 
 const rad = (d: number) => (d * Math.PI) / 180;
 const deg = (r: number) => (r * 180) / Math.PI;
@@ -107,6 +154,8 @@ export async function createScene(
   onStats: (stats: SceneStats) => void,
 ): Promise<SceneHandle> {
   const abort = new AbortController();
+  /** Une image est à redessiner (rendu à la demande). */
+  let dirty = true;
   const [lng0, lat0] = domain.center;
   const frame = makeFrame(lng0, lat0);
   const { pistes, forests } = data;
@@ -115,11 +164,14 @@ export async function createScene(
   const wideBounds: [number, number, number, number] = [lng0 - WIDE_LNG, lat0 - WIDE_LAT, lng0 + WIDE_LNG, lat0 + WIDE_LAT];
   const detailTiles = tilesCovering(detailBounds, 13);
   const farTiles = tilesCovering(wideBounds, 11);
+  const horizonBounds: [number, number, number, number] = [lng0 - HORIZON_LNG, lat0 - HORIZON_LAT, lng0 + HORIZON_LNG, lat0 + HORIZON_LAT];
+  const horizonTiles = tilesCovering(horizonBounds, 9);
 
   onProgress('Relief');
   const elev = await loadElevation(frame, [
     { zoom: 14, tiles: tilesCovering(detailBounds, 14) },
     { zoom: 11, tiles: farTiles },
+    { zoom: 9, tiles: horizonTiles },
   ]);
   const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
 
@@ -140,15 +192,17 @@ export async function createScene(
   container.appendChild(labels.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(SKY);
-  scene.fog = new THREE.Fog(FOG, 22_000, 70_000);
+  // Ciel : couleur du brouillard à l'horizon, bleu en montant (le relief lointain s'y fond).
+  scene.backgroundNode = mix(color(FOG), color(SKY), smoothstep(0, 0.45, normalWorld.y));
+  scene.fog = new THREE.Fog(FOG, FOG_NEAR, FOG_FAR);
 
-  // Lumière rasante du nord-ouest, comme l'ombrage des cartes : versants bien modelés. Le ciel
+  // Lumière rasante venant toujours du haut à gauche de l'écran, comme l'ombrage de la carte
+  // MapLibre (« viewport ») : elle tourne avec la caméra (voir syncSun). Fixe au nord-ouest, la vue
+  // depuis le nord ne montrait que des versants également éclairés : neige toute plate. Le ciel
   // bleuté éclaire les versants à l'ombre (intensités « physiques » : × π pour un blanc franc).
-  const sun = new THREE.DirectionalLight('#fff6ea', 1.0 * Math.PI);
-  sun.position.set(-1, 0.75, -0.8);
+  const sun = new THREE.DirectionalLight('#fff6ea', 1.05 * Math.PI);
   scene.add(sun);
-  scene.add(new THREE.HemisphereLight('#c3d6f5', '#5d6f91', 0.3 * Math.PI));
+  scene.add(new THREE.HemisphereLight('#c3d6f5', '#5d6f91', 0.42 * Math.PI));
 
   // ---- Relief ------------------------------------------------------------------------------
   onProgress('Maillage du relief');
@@ -158,13 +212,28 @@ export async function createScene(
     else if (f.geometry.type === 'MultiPolygon') forestPolygons.push(...f.geometry.coordinates);
   }
   const maxAnisotropy = renderer.getMaxAnisotropy();
+  // Snowparks et zones ludiques : emprises d'OpenStreetMap, ou zone autour de leur point.
+  const parkZones = parkZoneFeatures(data.parkZones, data.pois);
+  const paintParks = parkOverlay(parkZones);
   const chunks: Chunk[] = [];
   for (const [x, y] of detailTiles) {
-    chunks.push(buildChunk(frame, elev, { z: 13, x, y, segments: options.segments, textureZoom: 15, drop: 0 }, maxAnisotropy, forestPolygons));
+    chunks.push(buildChunk(frame, elev, { z: 13, x, y, segments: options.segments, textureZoom: 15, drop: 0 }, maxAnisotropy, forestPolygons, paintParks));
   }
   const detailChunks = [...chunks];
+  // Emprises couvertes par chaque niveau (unions de tuiles : des rectangles), que le niveau plus
+  // grossier ne redessine pas.
+  const rectOf = (z: number, tiles: [number, number][]): [number, number, number, number] => {
+    const rects = tiles.map(([x, y]) => frame.tileRect(z, x, y));
+    return [Math.min(...rects.map((r) => r[0])), Math.min(...rects.map((r) => r[1])), Math.max(...rects.map((r) => r[2])), Math.max(...rects.map((r) => r[3]))];
+  };
+  const detailRect = rectOf(13, detailTiles);
+  const farRect = rectOf(11, farTiles);
   for (const [x, y] of farTiles) {
-    chunks.push(buildChunk(frame, elev, { z: 11, x, y, segments: 64, textureZoom: 12, drop: 12 }, maxAnisotropy, forestPolygons));
+    chunks.push(buildChunk(frame, elev, { z: 11, x, y, segments: 64, textureZoom: 12, drop: 12, exclude: detailRect }, maxAnisotropy, forestPolygons));
+  }
+  // Horizon : tuiles 9 hors du cadre (sous les tuiles 11 là où elles se recouvrent).
+  for (const [x, y] of horizonTiles) {
+    chunks.push(buildChunk(frame, elev, { z: 9, x, y, segments: 64, textureZoom: 10, drop: 40, exclude: farRect }, maxAnisotropy, []));
   }
   for (const c of chunks) {
     c.mesh.updateMatrix();
@@ -176,9 +245,17 @@ export async function createScene(
   onProgress('Pistes et remontées');
   const tracks = buildTrackLayer(frame, elev, data.tracks);
   scene.add(tracks.group);
+  // Routes et rues, sous les pistes ; rues des villages seulement de près.
+  const roads = buildRoadLayer(frame, elev, data.roads);
+  scene.add(roads.group);
+  /** Rues masquées au-delà de cette distance de la caméra au point visé (m). */
+  const STREETS_MAX_M = 7000;
   const route = buildRouteLayer(frame, elev);
   scene.add(route.group);
   scene.add(buildPeakLabels(frame, elev, pistes));
+
+  // Lieux modélisés (restaurants, refuges, toilettes…), hors des villages dont on a les bâtiments.
+  const places = mountainPlaces(data.pois, data.builtAreas);
 
   onProgress('Sapins');
   const forest: Forest = buildForest(
@@ -188,10 +265,73 @@ export async function createScene(
     [
       ...data.tracks.pistes.map((p) => ({ coordinates: p.coordinates, halfWidth: 16 })),
       ...data.tracks.lifts.map((l) => ({ coordinates: l.coordinates, halfWidth: 7 })),
+      // Pas de sapin à travers un chalet ou un belvédère.
+      ...placeClearings(places),
     ],
     detailChunks,
   );
   scene.add(forest.group);
+
+  // ---- Bâtiments et remontées en 3D -----------------------------------------------------------
+  // Comme sur la carte MapLibre : affichés de près seulement, et grossis quand on s'éloigne
+  // (échelle k par demi-paliers, recalculée une fois la vue posée).
+  onProgress('Bâtiments et remontées');
+  const models = new THREE.Group();
+  scene.add(models);
+  let placeMeshes = new Map<string, THREE.Mesh>();
+  let liftMesh: THREE.Mesh | null = null;
+  let modelK = 0;
+  let placeCategories = new Set<string>();
+  const disposeMesh = (m: THREE.Mesh) => {
+    models.remove(m);
+    m.geometry.dispose();
+    (m.material as THREE.Material).dispose();
+  };
+  const buildModels = (k: number) => {
+    if (k === modelK) return;
+    modelK = k;
+    placeMeshes.forEach(disposeMesh);
+    if (liftMesh) disposeMesh(liftMesh);
+    placeMeshes = buildPlaceMeshes(frame, elev, places, k);
+    // `models` garde les véhicules : on ne retire que ce qu'on reconstruit.
+    placeMeshes.forEach((m, cat) => {
+      m.visible = placeCategories.has(cat);
+      models.add(m);
+    });
+    liftMesh = buildLiftMesh(frame, elev, data.tracks.lifts, k);
+    models.add(liftMesh);
+    dirty = true;
+  };
+  // Modules des snowparks (sauts, rails, box, entrée), à l'écart des remontées.
+  const parkMesh = buildVolumeMesh(
+    frame,
+    elev,
+    parkFeatureVolumes(
+      parkZones,
+      data.tracks.lifts.map((l) => l.coordinates),
+      (lng, lat) => {
+        const [x, z] = frame.toXZ(lng, lat);
+        return elev.at(x, z);
+      },
+    ),
+  );
+  models.add(parkMesh);
+
+  // Véhicules des remontées, animés tant qu'on les voit (voir la boucle de rendu).
+  const vehicles = buildLiftVehicles(frame, elev, data.tracks.lifts);
+  models.add(vehicles.mesh);
+  let closedLifts = new Set<number>();
+
+  /** Échelle des modèles selon la distance de la caméra au point visé (1 de près, 4 au plus). */
+  const modelScale = (distance: number) => Math.min(4, Math.max(1, 2 ** (Math.round(2 * Math.log2(distance / 1500)) / 2)));
+  // Bâtiments réels des villages : chargés en arrière-plan.
+  const villages = new THREE.Group();
+  scene.add(villages);
+  void loadVillageMesh(frame, elev, data.villageIds).then((mesh) => {
+    if (!mesh || abort.signal.aborted) return;
+    villages.add(mesh);
+    dirty = true;
+  });
 
   // ---- Caméra ------------------------------------------------------------------------------
   const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 20, 90_000);
@@ -200,7 +340,10 @@ export async function createScene(
   controls.dampingFactor = 0.12;
   controls.screenSpacePanning = false;
   controls.minDistance = 250;
-  controls.maxDistance = 45_000;
+  // Recul maximal : selon la forme de l'écran (voir aspectFactor).
+  controls.maxDistance = MAX_DISTANCE * aspectFactor(camera.aspect);
+  /** Vue d'ensemble : un peu en deçà du recul maximal. */
+  const overviewDistance = () => OVERVIEW_DISTANCE * aspectFactor(camera.aspect);
   controls.maxPolarAngle = rad(78);
   controls.autoRotateSpeed = 1.5;
 
@@ -213,6 +356,16 @@ export async function createScene(
     camera.position.set(tx - Math.sin(b) * distance * Math.sin(p), ty + distance * Math.cos(p), tz + Math.cos(b) * distance * Math.sin(p));
     camera.lookAt(controls.target);
   };
+  /**
+   * Soleil en haut à gauche de l'écran, quel que soit le cap : devant la caméra et à sa gauche,
+   * à ~31° au-dessus de l'horizon (relief lisible dans toutes les directions).
+   */
+  const syncSun = () => {
+    const off = camera.position.clone().sub(controls.target);
+    const b = Math.atan2(-off.x, off.z);
+    sun.position.set(Math.sin(b) - Math.cos(b), 0.85, -Math.cos(b) - Math.sin(b));
+  };
+
   /** Vue actuelle : point visé, distance, inclinaison et cap. */
   const currentView = () => {
     const off = camera.position.clone().sub(controls.target);
@@ -225,8 +378,22 @@ export async function createScene(
       bearing: deg(Math.atan2(-off.x, off.z)),
     };
   };
-  placeCamera(0, 0, OVERVIEW_DISTANCE, OVERVIEW_PITCH, domain.overviewBearing);
+  placeCamera(0, 0, overviewDistance(), OVERVIEW_PITCH, domain.overviewBearing);
   controls.update();
+  buildModels(modelScale(overviewDistance()));
+
+  /** Modèles 3D : masqués au-delà de ~9 km (zoom 13 de la carte MapLibre), bâtiments des villages au-delà de 14 km. */
+  const MODELS_MAX_M = 9000;
+  const VILLAGES_MAX_M = 14000;
+  let scaleTimer: ReturnType<typeof setTimeout> | undefined;
+  const syncModels = () => {
+    const d = camera.position.distanceTo(controls.target);
+    models.visible = d < MODELS_MAX_M;
+    villages.visible = d < VILLAGES_MAX_M;
+    // Nouvelle échelle une fois la vue posée (jamais pendant un geste).
+    clearTimeout(scaleTimer);
+    if (models.visible) scaleTimer = setTimeout(() => buildModels(modelScale(camera.position.distanceTo(controls.target))), 250);
+  };
 
   // ---- Déplacements animés ---------------------------------------------------------------------
   let anim: { from: ReturnType<typeof currentView>; to: ReturnType<typeof currentView>; start: number; duration: number } | null = null;
@@ -260,21 +427,59 @@ export async function createScene(
     placeCamera(from.x + (to.x - from.x) * k, from.z + (to.z - from.z) * k, distance, from.pitch + (to.pitch - from.pitch) * k, from.bearing + (to.bearing - from.bearing) * k);
     if (t >= 1) anim = null;
   };
-  // Un geste de l'utilisateur interrompt le déplacement.
-  controls.addEventListener('start', () => (anim = null));
+  // ---- Suivi du skieur (guidage) ---------------------------------------------------------------
+  let follow: { x: number; z: number; bearing: number | null } | null = null;
+  let followPausedUntil = 0;
+  /** Approche exponentielle de la vue de guidage ; vrai tant qu'elle n'est pas atteinte. */
+  const stepFollow = (dt: number, now: number): boolean => {
+    if (!follow || now < followPausedUntil) return false;
+    const cur = currentView();
+    const a = 1 - Math.exp(-dt / SMOOTH_POSITION_S);
+    const ab = 1 - Math.exp(-dt / SMOOTH_BEARING_S);
+    let db = (follow.bearing ?? cur.bearing) - cur.bearing;
+    db = ((((db + 180) % 360) + 360) % 360) - 180;
+    const dx = follow.x - cur.x;
+    const dz = follow.z - cur.z;
+    const dd = FOLLOW_DISTANCE - cur.distance;
+    const dp = FOLLOW_PITCH - cur.pitch;
+    placeCamera(cur.x + dx * a, cur.z + dz * a, cur.distance + dd * a, cur.pitch + dp * a, cur.bearing + db * ab);
+    return Math.hypot(dx, dz) > 0.3 || Math.abs(db) > 0.1 || Math.abs(dd) > 1 || Math.abs(dp) > 0.1;
+  };
+
+  // Un geste de l'utilisateur interrompt le déplacement, et le suivi pour un moment.
+  controls.addEventListener('start', () => {
+    anim = null;
+    if (follow) followPausedUntil = performance.now() + FOLLOW_RESUME_MS;
+  });
 
   // ---- Étiquettes ------------------------------------------------------------------------------
   const labelGroup = new THREE.Group();
   scene.add(labelGroup);
   const limited = new Map<CSS2DObject, number>();
+  /** Étiquettes qui glissent vers leur nouvelle position (repère GPS). */
+  const gliding = new Map<CSS2DObject, THREE.Vector3>();
+  const stepLabels = (dt: number): boolean => {
+    const a = 1 - Math.exp(-dt / SMOOTH_POSITION_S);
+    let moving = false;
+    for (const [obj, goal] of gliding) {
+      if (obj.position.distanceTo(goal) < 0.05) continue;
+      obj.position.lerp(goal, a);
+      moving = true;
+    }
+    return moving;
+  };
   const addLabel: SceneHandle['addLabel'] = (el, lng, lat, opts = {}) => {
     const obj = new CSS2DObject(el);
     const lift = opts.lift ?? 0;
-    const place = (lo: number, la: number) => {
+    const goal = new THREE.Vector3();
+    const place = (lo: number, la: number, first = false) => {
       const [x, z] = frame.toXZ(lo, la);
-      obj.position.set(x, ground(x, z) + lift, z);
+      goal.set(x, ground(x, z) + lift, z);
+      // Glissement, sauf au premier placement ou pour un saut de plus de 500 m (nouveau départ).
+      if (!opts.smooth || first || obj.position.distanceTo(goal) > 500) obj.position.copy(goal);
     };
-    place(lng, lat);
+    place(lng, lat, true);
+    if (opts.smooth) gliding.set(obj, goal);
     if (opts.anchorBottom) obj.center.set(0.5, 1);
     if (opts.maxDistance) limited.set(obj, opts.maxDistance);
     labelGroup.add(obj);
@@ -291,6 +496,7 @@ export async function createScene(
       remove() {
         labelGroup.remove(obj);
         limited.delete(obj);
+        gliding.delete(obj);
         el.remove();
         dirty = true;
       },
@@ -303,16 +509,45 @@ export async function createScene(
     }
   };
 
+  // Noms des parcs, en capitales orange (comme la carte MapLibre), jusqu'à ~12 km.
+  const parkLabels = parkLabelPoints(parkZones).map((p) => {
+    const el = document.createElement('div');
+    el.className = 'three-park';
+    el.textContent = p.label.toUpperCase();
+    return addLabel(el, p.lng, p.lat, { lift: 20, maxDistance: 12_000 });
+  });
+
+  // Numéros des grandes routes (D902…), en petites étiquettes, jusqu'à ~15 km.
+  for (const r of roads.refs) {
+    const el = document.createElement('div');
+    el.className = 'three-road-ref';
+    el.textContent = r.ref;
+    addLabel(el, r.lng, r.lat, { lift: 6, maxDistance: 15_000 });
+  }
+
   // ---- Sélection au clic ----------------------------------------------------------------------
   const pickCallbacks: ((e: PickEvent) => void)[] = [];
   const raycaster = new THREE.Raycaster();
   let down: { x: number; y: number; t: number } | null = null;
-  const onDown = (e: PointerEvent) => (down = { x: e.clientX, y: e.clientY, t: performance.now() });
+  /** Dernière image où la vue bougeait (glissé amorti de la souris). */
+  let viewMovedAt = 0;
+  const onDown = (e: PointerEvent) => {
+    // Clic pendant que la vue glisse encore : il l'arrête, sans rien ouvrir.
+    down = performance.now() - viewMovedAt < 120 ? null : { x: e.clientX, y: e.clientY, t: performance.now() };
+  };
+  // Un glisser qui revient près du départ n'est pas un clic.
+  const onMovePick = (e: PointerEvent) => {
+    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) down = null;
+  };
   const onUp = (e: PointerEvent) => {
     if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6 || performance.now() - down.t > 500) return;
     down = null;
+    pickAt(e.clientX, e.clientY);
+  };
+  /** Sélection au point d'écran (clic de souris, ou toucher reconnu par touchGestures). */
+  const pickAt = (clientX: number, clientY: number) => {
     const rect = renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
     const hit = raycaster.intersectObjects(pickable, false)[0];
     if (!hit) return;
@@ -320,26 +555,98 @@ export async function createScene(
     for (const cb of pickCallbacks) cb({ lng, lat, distance: hit.distance });
   };
   renderer.domElement.addEventListener('pointerdown', onDown);
+  renderer.domElement.addEventListener('pointermove', onMovePick);
   renderer.domElement.addEventListener('pointerup', onUp);
 
+  // ---- Gestes tactiles (téléphone) : comme Google Maps / Plans ----------------------------------
+  // MapControls garde la souris et le trackpad ; au doigt, touchGestures prend la main.
+  const gestures = installTouchGestures({
+    element: renderer.domElement,
+    camera,
+    view: currentView,
+    setView(v) {
+      placeCamera(v.x, v.z, Math.min(controls.maxDistance, Math.max(controls.minDistance, v.distance)), Math.min(78, Math.max(0, v.pitch)), v.bearing);
+      constrainView();
+      controls.update();
+      dirty = true;
+    },
+    animateTo(v) {
+      const [lng, lat] = frame.toLngLat(v.x, v.z);
+      flyTo({ lng, lat, distance: v.distance, pitch: v.pitch, bearing: v.bearing, duration: 350 });
+    },
+    targetY: () => controls.target.y,
+    onStart() {
+      anim = null;
+      controls.autoRotate = false;
+      if (follow) followPausedUntil = performance.now() + FOLLOW_RESUME_MS;
+    },
+    onTap: (x, y) => pickAt(x, y),
+    minDistance: controls.minDistance,
+    get maxDistance() {
+      return controls.maxDistance;
+    },
+    maxPitch: 78,
+  });
+
   // ---- Boucle de rendu ---------------------------------------------------------------------
-  let dirty = true;
   const frameTimes: number[] = [];
   let lastFrame = 0;
   let lastStats = 0;
   let treesDrawn = 0;
   const frameCallbacks = new Set<() => void>();
 
-  const keepAboveGround = () => {
-    // Le point visé suit le relief (rotation autour du sol), la caméra ne passe jamais dessous.
-    const dy = ground(controls.target.x, controls.target.z) - controls.target.y;
-    controls.target.y += dy;
+  // Zone où le point visé peut aller : le domaine et une marge (on ne part pas « s'échapper »).
+  const [ax0, az0] = frame.toXZ(detailBounds[0], detailBounds[3]);
+  const [ax1, az1] = frame.toXZ(detailBounds[2], detailBounds[1]);
+  const targetBox = { x0: ax0 - TARGET_MARGIN, x1: ax1 + TARGET_MARGIN, z0: az0 - TARGET_MARGIN, z1: az1 + TARGET_MARGIN };
+
+  /**
+   * Garde la vue dans la carte : point visé dans le domaine (avec la caméra qui le suit, sans
+   * tourner), caméra à moins de CAMERA_RADIUS du centre, et jamais sous le relief.
+   */
+  const constrainView = () => {
+    const t = controls.target;
+    const cx = Math.min(targetBox.x1, Math.max(targetBox.x0, t.x)) - t.x;
+    const cz = Math.min(targetBox.z1, Math.max(targetBox.z0, t.z)) - t.z;
+    if (cx || cz) {
+      t.x += cx;
+      t.z += cz;
+      camera.position.x += cx;
+      camera.position.z += cz;
+    }
+    // Le point visé suit le relief (rotation autour du sol).
+    const dy = ground(t.x, t.z) - t.y;
+    t.y += dy;
     camera.position.y += dy;
+    // Caméra trop loin du centre : rapprochée du point visé, dans la même direction.
+    const r = Math.hypot(camera.position.x, camera.position.z);
+    if (r > CAMERA_RADIUS) {
+      const off = camera.position.clone().sub(t);
+      // Plus grande fraction du recul horizontal qui ramène la caméra dans le cercle.
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < 20; i++) {
+        const mid = (lo + hi) / 2;
+        if (Math.hypot(t.x + (off.x * mid), t.z + (off.z * mid)) <= CAMERA_RADIUS) lo = mid;
+        else hi = mid;
+      }
+      camera.position.copy(t).addScaledVector(off, lo);
+    }
     const floor = ground(camera.position.x, camera.position.z) + CAMERA_CLEARANCE;
     if (camera.position.y < floor) camera.position.y = floor;
   };
 
+  let lastLoop = 0;
   const loop = (now: number) => {
+    const dt = lastLoop ? Math.min(0.1, (now - lastLoop) / 1000) : 0.016;
+    lastLoop = now;
+    // Remontées visibles (de près) : leurs véhicules avancent, l'image est redessinée en continu.
+    const liftsMoving = models.visible && document.visibilityState === 'visible';
+    if (liftsMoving) dirty = true;
+    // Guidage : caméra et repère glissent vers la dernière position, image après image.
+    if (stepFollow(dt, now)) dirty = true;
+    if (stepLabels(dt)) dirty = true;
+    if (gestures.step(dt)) dirty = true;
     const animating = anim !== null;
     stepAnim(now);
     const moved = !animating && controls.update();
@@ -347,10 +654,18 @@ export async function createScene(
       lastFrame = 0;
       return;
     }
-    if (moved) keepAboveGround();
+    if (moved) {
+      constrainView();
+      viewMovedAt = now;
+    }
     dirty = false;
     treesDrawn = forest.update(camera, 1);
+    syncModels();
+    const streetsShown = camera.position.distanceTo(controls.target) < STREETS_MAX_M;
+    for (const s of roads.streets) s.visible = streetsShown;
+    if (models.visible) vehicles.update(now / 1000, modelK, closedLifts);
     cullLabels();
+    syncSun();
     renderer.render(scene, camera);
     labels.render(scene, camera);
     for (const cb of frameCallbacks) cb();
@@ -383,6 +698,12 @@ export async function createScene(
     labels.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    controls.maxDistance = MAX_DISTANCE * aspectFactor(camera.aspect);
+    // Fenêtre élargie : la vue revient dans la nouvelle limite.
+    if (camera.position.distanceTo(controls.target) > controls.maxDistance) {
+      const v = currentView();
+      placeCamera(v.x, v.z, controls.maxDistance, v.pitch, v.bearing);
+    }
     dirty = true;
   });
   resize.observe(container);
@@ -415,8 +736,18 @@ export async function createScene(
       dirty = true;
     },
     flyTo,
+    follow(target) {
+      if (!target) {
+        follow = null;
+        return;
+      }
+      const [x, z] = frame.toXZ(target.lng, target.lat);
+      anim = null;
+      follow = { x, z, bearing: target.bearing ?? null };
+      dirty = true;
+    },
     overview() {
-      flyTo({ lng: lng0, lat: lat0, distance: OVERVIEW_DISTANCE, pitch: OVERVIEW_PITCH, bearing: domain.overviewBearing });
+      flyTo({ lng: lng0, lat: lat0, distance: overviewDistance(), pitch: OVERVIEW_PITCH, bearing: domain.overviewBearing });
     },
     project(lng, lat, lift = 0) {
       const [x, z] = frame.toXZ(lng, lat);
@@ -427,10 +758,21 @@ export async function createScene(
     addLabel,
     setClosedTracks(p, l) {
       tracks.setClosed(p, l);
+      closedLifts = l;
       dirty = true;
     },
     setHighlight(list) {
       tracks.setHighlight(list);
+      dirty = true;
+    },
+    setPlaceCategories(categories) {
+      placeCategories = categories;
+      placeMeshes.forEach((m, cat) => (m.visible = categories.has(cat)));
+      // Snowparks : zones peintes, noms et modules suivent la même case.
+      const parks = categories.has('snowpark');
+      parksShown.value = parks ? 1 : 0;
+      parkMesh.visible = parks;
+      parkLabels.forEach((l) => l.setVisible(parks));
       dirty = true;
     },
     setRoute(steps, guiding) {
@@ -451,10 +793,13 @@ export async function createScene(
     },
     dispose() {
       abort.abort();
+      clearTimeout(scaleTimer);
       renderer.setAnimationLoop(null);
       resize.disconnect();
       controls.dispose();
+      gestures.dispose();
       renderer.domElement.removeEventListener('pointerdown', onDown);
+      renderer.domElement.removeEventListener('pointermove', onMovePick);
       renderer.domElement.removeEventListener('pointerup', onUp);
       scene.traverse((o) => {
         const mesh = o as THREE.Mesh;
