@@ -160,13 +160,20 @@ const CABLE_SPEED: Record<string, number> = {
   rope_tow: 2.5,
 };
 
+/**
+ * Au-delà de cette distance de la caméra (m), une remontée n'a plus de véhicules : à l'écran, ils
+ * ne feraient qu'un pixel, et chaque véhicule animé oblige à redessiner la carte à chaque image.
+ */
+const VEHICLE_RANGE_M = 5000;
+
 export interface LiftVehicles {
   mesh: THREE.InstancedMesh;
   /**
-   * Place les véhicules à l'instant `seconds`, à l'échelle `k` ; les remontées fermées
-   * (identifiants OpenStreetMap) restent immobiles.
+   * Place les véhicules à l'instant `seconds`, à l'échelle `k`, pour les seules remontées
+   * proches de la caméra et dans son champ ; les remontées fermées (identifiants OpenStreetMap)
+   * restent immobiles. Rend le nombre de remontées animées (0 : rien ne bouge à l'écran).
    */
-  update(seconds: number, k: number, closed: Set<number>): void;
+  update(seconds: number, k: number, closed: Set<number>, camera: THREE.Camera): number;
 }
 
 /** Véhicules des remontées : pavés instanciés, une seule géométrie et un seul appel de dessin. */
@@ -191,15 +198,40 @@ export function buildLiftVehicles(frame: Frame, elev: Elevation, lifts: TrackLin
     if (!c) colors.set(hex, (c = new THREE.Color(hex)));
     return c;
   };
+  // Emprise de chaque remontée (sphère autour de son tracé, câbles compris) pour l'écarter de loin.
+  const spheres = lifts.map((l) => {
+    const pts = l.coordinates.map(([lng, lat]) => {
+      const [x, z] = frame.toXZ(lng, lat);
+      return new THREE.Vector3(x, elev.atOr0(x, z) * EXAGGERATION, z);
+    });
+    const sphere = new THREE.Sphere().setFromPoints(pts);
+    sphere.radius += 60;
+    return sphere;
+  });
+  const frustum = new THREE.Frustum();
+  const viewProj = new THREE.Matrix4();
 
   return {
     mesh,
-    update(seconds, k, closed) {
+    update(seconds, k, closed, camera) {
+      camera.updateMatrixWorld();
+      viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(viewProj);
+      const include = (index: number) => {
+        const sphere = spheres[index];
+        return sphere.distanceToPoint(camera.position) < VEHICLE_RANGE_M && frustum.intersectsSphere(sphere);
+      };
+      /** Remontées ouvertes dont des véhicules avancent à l'écran. */
+      let active = 0;
       let i = 0;
       liftVehicleBoxes(
         lines,
         k,
-        (index) => (closed.has(lifts[index].osmId) ? 0 : seconds * (CABLE_SPEED[lifts[index].detail] ?? 5)),
+        (index) => {
+          if (closed.has(lifts[index].osmId)) return 0;
+          active++;
+          return seconds * (CABLE_SPEED[lifts[index].detail] ?? 5);
+        },
         (lng, lat, ux, uy, along, across, b, h, c) => {
           if (i >= capacity) return;
           const [x, z] = frame.toXZ(lng, lat);
@@ -213,10 +245,12 @@ export function buildLiftVehicles(frame: Frame, elev: Elevation, lifts: TrackLin
           mesh.setColorAt(i, colorOf(c));
           i++;
         },
+        include,
       );
       mesh.count = i;
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      return active;
     },
   };
 }

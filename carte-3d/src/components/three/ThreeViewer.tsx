@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, Layers, Loader2, LocateFixed, Maximize2, Menu, Navigation, RotateCw, Search, Snowflake, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Layers, LocateFixed, Maximize2, Menu, Navigation, RotateCw, Search, Snowflake, X } from 'lucide-react';
 import type { PisteDifficulty } from '@/lib/apis/overpass';
 import { DOMAIN_POI_CATEGORIES, type DomainPoi, type DomainPoiCategoryId } from '@/lib/domainPois';
 import { DIFFICULTY_SINGULAR, LIFT_LABELS, type SkiDomainConfig } from '@/lib/skiDomains';
@@ -113,7 +113,8 @@ export default function ThreeViewer({ domain }: { domain: SkiDomainConfig }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<SceneHandle | null>(null);
   const [data, setData] = useState<DomainData | null>(null);
-  const [progress, setProgress] = useState<string | null>('Pistes et lieux');
+  /** Écran de chargement : étape et avancement (0 à 1), jusqu'à ce que la carte soit fluide. */
+  const [progress, setProgress] = useState<{ label: string; fraction: number } | null>({ label: 'Pistes et lieux', fraction: 0 });
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<SceneStats | null>(null);
   const [isWinter, setWinter] = useState(true);
@@ -249,7 +250,7 @@ export default function ThreeViewer({ domain }: { domain: SkiDomainConfig }) {
             segments: Math.min(512, Math.max(16, Number(params.get('maillage')) || 128)),
             antialias: params.has('aa'),
           },
-          (label) => !disposed && setProgress(label || null),
+          (label, fraction) => !disposed && setProgress(label === null ? null : { label, fraction }),
           (s) => !disposed && setStats(s),
         );
       })
@@ -1055,9 +1056,23 @@ export default function ThreeViewer({ domain }: { domain: SkiDomainConfig }) {
             </>
           ) : (
             <>
-              <Loader2 className="mb-4 h-8 w-8 animate-spin text-white/80" />
               <p className="font-display text-2xl">{domain.name}</p>
-              <p className="mt-1 text-sm text-white/60">{progress}…</p>
+              <div
+                className="mt-5 h-1.5 w-64 max-w-[70vw] overflow-hidden rounded-full bg-white/15"
+                role="progressbar"
+                aria-label="Chargement de la carte"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round((progress?.fraction ?? 0) * 100)}
+              >
+                <div
+                  className="h-full rounded-full bg-white transition-[width] duration-300 ease-out"
+                  style={{ width: `${Math.max(3, Math.round((progress?.fraction ?? 0) * 100))}%` }}
+                />
+              </div>
+              <p className="mt-2 text-sm tabular-nums text-white/60">
+                {progress?.label}… {Math.round((progress?.fraction ?? 0) * 100)} %
+              </p>
             </>
           )}
         </div>

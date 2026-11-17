@@ -346,10 +346,12 @@ const preparedLift = (line: LiftLine) => {
 /**
  * Véhicules des remontées, animés (carte Three.js) : chaque pavé est passé à `sink`, la remontée
  * `i` ayant parcouru `travelOf(i)` mètres de câble. Même placement que les véhicules immobiles.
+ * `include` : remontées à animer (les autres sont sautées : trop loin, ou hors de l'écran).
  */
-export function liftVehicleBoxes(lines: LiftLine[], k: number, travelOf: (i: number) => number, sink: BoxSink) {
+export function liftVehicleBoxes(lines: LiftLine[], k: number, travelOf: (i: number) => number, sink: BoxSink, include?: (i: number) => boolean) {
   const s = scaleOf(k);
   lines.forEach((line, i) => {
+    if (include && !include(i)) return;
     const l = preparedLift(line);
     if (l) addVehicles(sink, l, s, travelOf(i));
   });

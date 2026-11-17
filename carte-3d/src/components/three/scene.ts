@@ -150,7 +150,8 @@ export async function createScene(
   domain: SkiDomainConfig,
   data: DomainData,
   options: SceneOptions,
-  onProgress: (label: string) => void,
+  /** Étape du chargement et avancement (0 à 1) ; `null` : la carte est prête et fluide. */
+  onProgress: (label: string | null, fraction: number) => void,
   onStats: (stats: SceneStats) => void,
 ): Promise<SceneHandle> {
   const abort = new AbortController();
@@ -167,12 +168,37 @@ export async function createScene(
   const horizonBounds: [number, number, number, number] = [lng0 - HORIZON_LNG, lat0 - HORIZON_LAT, lng0 + HORIZON_LNG, lat0 + HORIZON_LAT];
   const horizonTiles = tilesCovering(horizonBounds, 9);
 
-  onProgress('Relief');
-  const elev = await loadElevation(frame, [
+  // Avancement : données 0–5 % (ThreeViewer), relief 5–35 %, maillage et objets 35–60 %,
+  // photos aériennes du domaine 60–92 %, mise en route (images régulières) 92–100 %.
+  /** Laisse le navigateur afficher l'avancement entre deux gros calculs (au plus tous les 60 ms). */
+  let lastYield = performance.now();
+  const breathe = async () => {
+    if (performance.now() - lastYield < 60) return;
+    await new Promise<void>((resolve) => {
+      // Onglet en arrière-plan : pas d'image à attendre, on continue quand même.
+      const t = setTimeout(resolve, 50);
+      requestAnimationFrame(() => {
+        clearTimeout(t);
+        setTimeout(resolve, 0);
+      });
+    });
+    lastYield = performance.now();
+  };
+  const step = async (label: string, fraction: number) => {
+    onProgress(label, fraction);
+    lastYield = 0;
+    await breathe();
+  };
+
+  const elevLevels = [
     { zoom: 14, tiles: tilesCovering(detailBounds, 14) },
     { zoom: 11, tiles: farTiles },
     { zoom: 9, tiles: horizonTiles },
-  ]);
+  ];
+  const elevTotal = elevLevels.reduce((n, l) => n + l.tiles.length, 0);
+  let elevDone = 0;
+  onProgress('Relief', 0.05);
+  const elev = await loadElevation(frame, elevLevels, () => onProgress('Relief', 0.05 + (0.3 * ++elevDone) / elevTotal));
   const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
 
   // ---- Moteur ------------------------------------------------------------------------------
@@ -205,7 +231,7 @@ export async function createScene(
   scene.add(new THREE.HemisphereLight('#c3d6f5', '#5d6f91', 0.42 * Math.PI));
 
   // ---- Relief ------------------------------------------------------------------------------
-  onProgress('Maillage du relief');
+  await step('Maillage du relief', 0.35);
   const forestPolygons: number[][][][] = [];
   for (const f of forests.features) {
     if (f.geometry.type === 'Polygon') forestPolygons.push(f.geometry.coordinates);
@@ -216,8 +242,15 @@ export async function createScene(
   const parkZones = parkZoneFeatures(data.parkZones, data.pois);
   const paintParks = parkOverlay(parkZones);
   const chunks: Chunk[] = [];
+  const chunkTotal = detailTiles.length + farTiles.length + horizonTiles.length;
+  /** Une tuile de relief maillée : avancement, et une pause de temps en temps pour l'afficher. */
+  const meshed = async () => {
+    onProgress('Maillage du relief', 0.35 + (0.12 * chunks.length) / chunkTotal);
+    await breathe();
+  };
   for (const [x, y] of detailTiles) {
     chunks.push(buildChunk(frame, elev, { z: 13, x, y, segments: options.segments, textureZoom: 15, drop: 0 }, maxAnisotropy, forestPolygons, paintParks));
+    await meshed();
   }
   const detailChunks = [...chunks];
   // Emprises couvertes par chaque niveau (unions de tuiles : des rectangles), que le niveau plus
@@ -230,10 +263,12 @@ export async function createScene(
   const farRect = rectOf(11, farTiles);
   for (const [x, y] of farTiles) {
     chunks.push(buildChunk(frame, elev, { z: 11, x, y, segments: 64, textureZoom: 12, drop: 12, exclude: detailRect }, maxAnisotropy, forestPolygons));
+    await meshed();
   }
   // Horizon : tuiles 9 hors du cadre (sous les tuiles 11 là où elles se recouvrent).
   for (const [x, y] of horizonTiles) {
     chunks.push(buildChunk(frame, elev, { z: 9, x, y, segments: 64, textureZoom: 10, drop: 40, exclude: farRect }, maxAnisotropy, []));
+    await meshed();
   }
   for (const c of chunks) {
     c.mesh.updateMatrix();
@@ -242,7 +277,7 @@ export async function createScene(
   const pickable = chunks.map((c) => c.mesh);
 
   // ---- Tracés, sommets, sapins ---------------------------------------------------------------
-  onProgress('Pistes et remontées');
+  await step('Pistes et remontées', 0.47);
   const tracks = buildTrackLayer(frame, elev, data.tracks);
   scene.add(tracks.group);
   // Routes et rues, sous les pistes ; rues des villages seulement de près.
@@ -257,7 +292,7 @@ export async function createScene(
   // Lieux modélisés (restaurants, refuges, toilettes…), hors des villages dont on a les bâtiments.
   const places = mountainPlaces(data.pois, data.builtAreas);
 
-  onProgress('Sapins');
+  await step('Sapins', 0.5);
   const forest: Forest = buildForest(
     frame,
     elev,
@@ -275,11 +310,13 @@ export async function createScene(
   // ---- Bâtiments et remontées en 3D -----------------------------------------------------------
   // Comme sur la carte MapLibre : affichés de près seulement, et grossis quand on s'éloigne
   // (échelle k par demi-paliers, recalculée une fois la vue posée).
-  onProgress('Bâtiments et remontées');
+  await step('Bâtiments et remontées', 0.54);
   const models = new THREE.Group();
   scene.add(models);
   let placeMeshes = new Map<string, THREE.Mesh>();
   let liftMesh: THREE.Mesh | null = null;
+  /** Gares, pylônes et câbles affichés (de près seulement, voir syncModels). */
+  let liftsShown = true;
   let modelK = 0;
   let placeCategories = new Set<string>();
   const disposeMesh = (m: THREE.Mesh) => {
@@ -299,6 +336,7 @@ export async function createScene(
       models.add(m);
     });
     liftMesh = buildLiftMesh(frame, elev, data.tracks.lifts, k);
+    liftMesh.visible = liftsShown;
     models.add(liftMesh);
     dirty = true;
   };
@@ -385,11 +423,24 @@ export async function createScene(
   /** Modèles 3D : masqués au-delà de ~9 km (zoom 13 de la carte MapLibre), bâtiments des villages au-delà de 14 km. */
   const MODELS_MAX_M = 9000;
   const VILLAGES_MAX_M = 14000;
+  /**
+   * Remontées en 3D (télésièges, télécabines, tire-fesses) : de loin, il ne reste que leur trait
+   * au sol. Véhicules masqués au-delà de VEHICLES_MAX_M, puis gares, pylônes et câbles au-delà de
+   * LIFTS_MAX_M. Distances ramenées à un écran en hauteur (voir aspectFactor) : sur un ordinateur,
+   * on voit aussi large d'un peu plus près, les remontées s'effacent donc plus tôt.
+   */
+  const VEHICLES_MAX_M = 7000;
+  const LIFTS_MAX_M = 10_000;
+  let vehiclesShown = true;
   let scaleTimer: ReturnType<typeof setTimeout> | undefined;
   const syncModels = () => {
     const d = camera.position.distanceTo(controls.target);
     models.visible = d < MODELS_MAX_M;
     villages.visible = d < VILLAGES_MAX_M;
+    const seen = d / aspectFactor(camera.aspect);
+    liftsShown = seen < LIFTS_MAX_M;
+    vehiclesShown = seen < VEHICLES_MAX_M;
+    if (liftMesh) liftMesh.visible = liftsShown;
     // Nouvelle échelle une fois la vue posée (jamais pendant un geste).
     clearTimeout(scaleTimer);
     if (models.visible) scaleTimer = setTimeout(() => buildModels(modelScale(camera.position.distanceTo(controls.target))), 250);
@@ -636,13 +687,49 @@ export async function createScene(
     if (camera.position.y < floor) camera.position.y = floor;
   };
 
+  /** Des véhicules de remontée avancent à l'écran (image précédente). */
+  let liftsMoving = false;
+
+  // ---- Mise en route : la carte n'est montrée qu'une fois fluide --------------------------------
+  /** Images de suite à cadence régulière avant de montrer la carte. */
+  const WARM_FRAMES = 12;
+  /** Au plus (ms) : un appareil lent ne reste pas bloqué sur l'écran de chargement. */
+  const WARM_MAX_MS = 4000;
+  let warm: { start: number; last: number; times: number[]; done: () => void } | null = null;
+  /**
+   * Dessine la carte en continu (sous l'écran de chargement) jusqu'à ce que les images s'enchaînent
+   * à cadence régulière : textures envoyées à la carte graphique, sapins posés, à-coups passés.
+   */
+  const warmUp = () =>
+    new Promise<void>((done) => {
+      warm = { start: performance.now(), last: 0, times: [], done };
+      dirty = true;
+    });
+  const stepWarm = (now: number) => {
+    const w = warm!;
+    if (w.last) w.times.push(now - w.last);
+    w.last = now;
+    const recent = w.times.slice(-WARM_FRAMES);
+    const sorted = [...recent].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] ?? Infinity;
+    // Régulière : aucune image bien plus longue que les autres (plus d'à-coups). Un appareil lent
+    // n'ira pas plus vite en attendant : c'est la régularité qu'on attend, pas une cadence donnée.
+    const steady = recent.filter((t) => t < Math.max(20, median * 1.5)).length;
+    onProgress('Mise en route', 0.92 + 0.08 * (steady / WARM_FRAMES));
+    if ((recent.length === WARM_FRAMES && steady === WARM_FRAMES) || now - w.start > WARM_MAX_MS) {
+      warm = null;
+      w.done();
+    }
+  };
+
   let lastLoop = 0;
   const loop = (now: number) => {
     const dt = lastLoop ? Math.min(0.1, (now - lastLoop) / 1000) : 0.016;
     lastLoop = now;
-    // Remontées visibles (de près) : leurs véhicules avancent, l'image est redessinée en continu.
-    const liftsMoving = models.visible && document.visibilityState === 'visible';
-    if (liftsMoving) dirty = true;
+    // Remontées proches à l'écran : leurs véhicules avancent, l'image est redessinée en continu.
+    // De loin (ou hors champ), plus aucun véhicule : la carte se repose tant que la vue ne bouge pas.
+    if (liftsMoving && document.visibilityState === 'visible') dirty = true;
+    if (warm) dirty = true;
     // Guidage : caméra et repère glissent vers la dernière position, image après image.
     if (stepFollow(dt, now)) dirty = true;
     if (stepLabels(dt)) dirty = true;
@@ -663,12 +750,14 @@ export async function createScene(
     syncModels();
     const streetsShown = camera.position.distanceTo(controls.target) < STREETS_MAX_M;
     for (const s of roads.streets) s.visible = streetsShown;
-    if (models.visible) vehicles.update(now / 1000, modelK, closedLifts);
+    liftsMoving = models.visible && vehiclesShown && vehicles.update(now / 1000, modelK, closedLifts, camera) > 0;
+    vehicles.mesh.visible = models.visible && vehiclesShown && vehicles.mesh.count > 0;
     cullLabels();
     syncSun();
     renderer.render(scene, camera);
     labels.render(scene, camera);
     for (const cb of frameCallbacks) cb();
+    if (warm) stepWarm(now);
 
     if (lastFrame && now - lastFrame < 250) frameTimes.push(now - lastFrame);
     lastFrame = now;
@@ -687,6 +776,20 @@ export async function createScene(
       });
     }
   };
+  // Programmes de dessin préparés d'avance (sinon, à-coups au premier passage de chaque objet) :
+  // tout est montré le temps de les compiler, la boucle remet ensuite chaque chose à sa place.
+  await step("Préparation de l'affichage", 0.57);
+  models.visible = villages.visible = true;
+  // (liftMesh est posé par buildModels : TypeScript ne le voit pas.)
+  const lifts3d = liftMesh as THREE.Mesh | null;
+  if (lifts3d) lifts3d.visible = true;
+  placeMeshes.forEach((m) => (m.visible = true));
+  try {
+    await renderer.compileAsync(scene, camera);
+  } catch {
+    // Compilation d'avance impossible : elle se fera au premier dessin, sous l'écran de chargement.
+  }
+  placeMeshes.forEach((m, cat) => (m.visible = placeCategories.has(cat)));
   renderer.setAnimationLoop(loop);
   controls.addEventListener('change', () => (dirty = true));
 
@@ -709,7 +812,14 @@ export async function createScene(
   resize.observe(container);
 
   // ---- Photos aériennes, du centre vers l'extérieur ------------------------------------------
-  onProgress('');
+  // Celles du domaine d'abord : la carte n'est montrée qu'une fois toutes posées (ou au bout de
+  // PHOTOS_MAX_MS, réseau lent), puis après quelques images régulières (warmUp).
+  const PHOTOS_MAX_MS = 20_000;
+  let detailPhotos = 0;
+  let photosReady: () => void = () => undefined;
+  const photosDone = new Promise<void>((resolve) => (photosReady = resolve));
+  if (!detailChunks.length) photosReady();
+  onProgress('Photos aériennes', 0.6);
   const queue = [...chunks].sort((a, b) => {
     const level = (c: Chunk) => (c.spec.z === 13 ? 0 : 1);
     return level(a) - level(b) || a.center.lengthSq() - b.center.lengthSq();
@@ -721,9 +831,16 @@ export async function createScene(
         const chunk = queue.shift()!;
         await chunk.loadPhoto(abort.signal);
         dirty = true;
+        if (chunk.spec.z === 13 && ++detailPhotos <= detailChunks.length) {
+          onProgress('Photos aériennes', 0.6 + (0.32 * detailPhotos) / detailChunks.length);
+          if (detailPhotos === detailChunks.length) photosReady();
+        }
       }
     }),
   );
+  void Promise.race([photosDone, new Promise((resolve) => setTimeout(resolve, PHOTOS_MAX_MS))])
+    .then(() => (abort.signal.aborted ? undefined : warmUp()))
+    .then(() => !abort.signal.aborted && onProgress(null, 1));
 
   const v = new THREE.Vector3();
   return {
