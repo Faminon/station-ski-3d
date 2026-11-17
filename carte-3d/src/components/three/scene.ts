@@ -16,10 +16,11 @@ import { domainDetailBounds } from '@/lib/domainArea';
 import type { SkiDomainConfig } from '@/lib/skiDomains';
 import type { DomainData, TrackLine } from './domainData';
 import { loadElevation } from './elevation';
-import { buildForest, type Forest } from './forest';
+import { createForest } from './forest';
 import { EXAGGERATION, makeFrame, tilesCovering } from './geo';
 import { buildPeakLabels, buildRoadLayer, buildRouteLayer, buildTrackLayer, type RouteStepLine } from './overlays';
-import { buildChunk, parksShown, winter, type Chunk } from './terrain';
+import { buildChunk, DEM_ZOOM, parksShown, winter, type Chunk } from './terrain';
+import { startTerrainWorker, TREE_FLOATS } from './terrainWorker';
 import { installTouchGestures } from './touchGestures';
 import { parkLabelPoints, parkOverlay } from './parks';
 import { parkZoneFeatures } from '@/components/domain/parkZones';
@@ -170,6 +171,7 @@ export async function createScene(
 
   // Avancement : données 0–5 % (ThreeViewer), relief 5–35 %, maillage et objets 35–60 %,
   // photos aériennes du domaine 60–92 %, mise en route (images régulières) 92–100 %.
+  // Les sapins ne font pas attendre : plantés à part (worker), ils poussent une fois la carte montrée.
   /** Laisse le navigateur afficher l'avancement entre deux gros calculs (au plus tous les 60 ms). */
   let lastYield = performance.now();
   const breathe = async () => {
@@ -197,16 +199,37 @@ export async function createScene(
   ];
   const elevTotal = elevLevels.reduce((n, l) => n + l.tiles.length, 0);
   let elevDone = 0;
-  onProgress('Relief', 0.05);
-  const elev = await loadElevation(frame, elevLevels, () => onProgress('Relief', 0.05 + (0.3 * ++elevDone) / elevTotal));
-  const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
-
-  // ---- Moteur ------------------------------------------------------------------------------
   const renderer = new THREE.WebGPURenderer({ antialias: options.antialias, forceWebGL: options.forceWebGL, powerPreference: 'high-performance' });
   // Écrans très denses : rendu plafonné à ×2, comme la carte MapLibre.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
-  await renderer.init();
+  const rendererReady = renderer.init();
+  onProgress('Relief', 0.05);
+  const elev = await loadElevation(frame, elevLevels, () => onProgress('Relief', 0.05 + (0.3 * ++elevDone) / elevTotal));
+  const ground = (x: number, z: number) => elev.atOr0(x, z) * EXAGGERATION;
+
+  const forestPolygons: number[][][][] = [];
+  for (const f of forests.features) {
+    if (f.geometry.type === 'Polygon') forestPolygons.push(f.geometry.coordinates);
+    else if (f.geometry.type === 'MultiPolygon') forestPolygons.push(...f.geometry.coordinates);
+  }
+  // Lieux modélisés (restaurants, refuges, toilettes…), hors des villages dont on a les bâtiments.
+  const places = mountainPlaces(data.pois, data.builtAreas);
+  // Worker du relief : pentes par pixel des tuiles du domaine, puis sapins, pendant que le fil
+  // principal démarre le moteur, maille le relief et prépare l'affichage.
+  const worker = startTerrainWorker(elev.tiles(DEM_ZOOM), forestPolygons, [
+    ...data.tracks.pistes.map((p) => ({ coordinates: p.coordinates, halfWidth: 16 })),
+    ...data.tracks.lifts.map((l) => ({ coordinates: l.coordinates, halfWidth: 7 })),
+    // Pas de sapin à travers un chalet ou un belvédère.
+    ...placeClearings(places),
+  ]);
+  const slopes = detailTiles.map(([x, y]) => {
+    const [rx0, , rx1] = frame.tileRect(13, x, y);
+    return worker?.normals(13, x, y, (rx1 - rx0) / (256 * 2 ** (DEM_ZOOM - 13))) ?? Promise.resolve(null);
+  });
+
+  // ---- Moteur (démarré pendant le téléchargement des altitudes) ------------------------------
+  await rendererReady;
   container.appendChild(renderer.domElement);
   renderer.domElement.style.display = 'block';
   renderer.domElement.style.touchAction = 'none';
@@ -232,27 +255,17 @@ export async function createScene(
 
   // ---- Relief ------------------------------------------------------------------------------
   await step('Maillage du relief', 0.35);
-  const forestPolygons: number[][][][] = [];
-  for (const f of forests.features) {
-    if (f.geometry.type === 'Polygon') forestPolygons.push(f.geometry.coordinates);
-    else if (f.geometry.type === 'MultiPolygon') forestPolygons.push(...f.geometry.coordinates);
-  }
   const maxAnisotropy = renderer.getMaxAnisotropy();
   // Snowparks et zones ludiques : emprises d'OpenStreetMap, ou zone autour de leur point.
   const parkZones = parkZoneFeatures(data.parkZones, data.pois);
   const paintParks = parkOverlay(parkZones);
-  const chunks: Chunk[] = [];
   const chunkTotal = detailTiles.length + farTiles.length + horizonTiles.length;
+  let chunksBuilt = 0;
   /** Une tuile de relief maillée : avancement, et une pause de temps en temps pour l'afficher. */
   const meshed = async () => {
-    onProgress('Maillage du relief', 0.35 + (0.12 * chunks.length) / chunkTotal);
+    onProgress('Maillage du relief', 0.35 + (0.12 * ++chunksBuilt) / chunkTotal);
     await breathe();
   };
-  for (const [x, y] of detailTiles) {
-    chunks.push(buildChunk(frame, elev, { z: 13, x, y, segments: options.segments, textureZoom: 15, drop: 0 }, maxAnisotropy, forestPolygons, paintParks));
-    await meshed();
-  }
-  const detailChunks = [...chunks];
   // Emprises couvertes par chaque niveau (unions de tuiles : des rectangles), que le niveau plus
   // grossier ne redessine pas.
   const rectOf = (z: number, tiles: [number, number][]): [number, number, number, number] => {
@@ -261,15 +274,30 @@ export async function createScene(
   };
   const detailRect = rectOf(13, detailTiles);
   const farRect = rectOf(11, farTiles);
+  // Tuiles larges d'abord (le worker calcule les pentes du domaine pendant ce temps).
+  const farChunks: Chunk[] = [];
   for (const [x, y] of farTiles) {
-    chunks.push(buildChunk(frame, elev, { z: 11, x, y, segments: 64, textureZoom: 12, drop: 12, exclude: detailRect }, maxAnisotropy, forestPolygons));
+    farChunks.push(buildChunk(frame, elev, { z: 11, x, y, segments: 64, textureZoom: 12, drop: 12, exclude: detailRect }, maxAnisotropy, forestPolygons));
     await meshed();
   }
   // Horizon : tuiles 9 hors du cadre (sous les tuiles 11 là où elles se recouvrent).
   for (const [x, y] of horizonTiles) {
-    chunks.push(buildChunk(frame, elev, { z: 9, x, y, segments: 64, textureZoom: 10, drop: 40, exclude: farRect }, maxAnisotropy, []));
+    farChunks.push(buildChunk(frame, elev, { z: 9, x, y, segments: 64, textureZoom: 10, drop: 40, exclude: farRect }, maxAnisotropy, []));
     await meshed();
   }
+  const detailChunks: Chunk[] = [];
+  for (let i = 0; i < detailTiles.length; i++) {
+    const [x, y] = detailTiles[i];
+    const spec = { z: 13, x, y, segments: options.segments, textureZoom: 15, drop: 0 };
+    detailChunks.push(buildChunk(frame, elev, spec, maxAnisotropy, forestPolygons, paintParks, await slopes[i]));
+    await meshed();
+  }
+  const chunks = [...detailChunks, ...farChunks];
+  // Sapins demandés tout de suite (le worker les plante d'avance), posés une fois la carte montrée :
+  // ceux du domaine d'abord, du centre vers l'extérieur.
+  const treeJobs = [...chunks]
+    .sort((a, b) => (a.spec.z === 13 ? 0 : 1) - (b.spec.z === 13 ? 0 : 1) || a.center.lengthSq() - b.center.lengthSq())
+    .map((chunk) => ({ chunk, trees: worker?.trees(chunk.spec.z, chunk.spec.x, chunk.spec.y) ?? Promise.resolve(new Float32Array(0)) }));
   for (const c of chunks) {
     c.mesh.updateMatrix();
     scene.add(c.mesh);
@@ -277,7 +305,7 @@ export async function createScene(
   const pickable = chunks.map((c) => c.mesh);
 
   // ---- Tracés, sommets, sapins ---------------------------------------------------------------
-  await step('Pistes et remontées', 0.47);
+  await step('Pistes et remontées', 0.48);
   const tracks = buildTrackLayer(frame, elev, data.tracks);
   scene.add(tracks.group);
   // Routes et rues, sous les pistes ; rues des villages seulement de près.
@@ -289,28 +317,13 @@ export async function createScene(
   scene.add(route.group);
   scene.add(buildPeakLabels(frame, elev, pistes));
 
-  // Lieux modélisés (restaurants, refuges, toilettes…), hors des villages dont on a les bâtiments.
-  const places = mountainPlaces(data.pois, data.builtAreas);
-
-  await step('Sapins', 0.5);
-  const forest: Forest = buildForest(
-    frame,
-    elev,
-    forests,
-    [
-      ...data.tracks.pistes.map((p) => ({ coordinates: p.coordinates, halfWidth: 16 })),
-      ...data.tracks.lifts.map((l) => ({ coordinates: l.coordinates, halfWidth: 7 })),
-      // Pas de sapin à travers un chalet ou un belvédère.
-      ...placeClearings(places),
-    ],
-    detailChunks,
-  );
+  const forest = createForest(frame, elev);
   scene.add(forest.group);
 
   // ---- Bâtiments et remontées en 3D -----------------------------------------------------------
   // Comme sur la carte MapLibre : affichés de près seulement, et grossis quand on s'éloigne
   // (échelle k par demi-paliers, recalculée une fois la vue posée).
-  await step('Bâtiments et remontées', 0.54);
+  await step('Bâtiments et remontées', 0.52);
   const models = new THREE.Group();
   scene.add(models);
   let placeMeshes = new Map<string, THREE.Mesh>();
@@ -692,9 +705,9 @@ export async function createScene(
 
   // ---- Mise en route : la carte n'est montrée qu'une fois fluide --------------------------------
   /** Images de suite à cadence régulière avant de montrer la carte. */
-  const WARM_FRAMES = 12;
+  const WARM_FRAMES = 6;
   /** Au plus (ms) : un appareil lent ne reste pas bloqué sur l'écran de chargement. */
-  const WARM_MAX_MS = 4000;
+  const WARM_MAX_MS = 1500;
   let warm: { start: number; last: number; times: number[]; done: () => void } | null = null;
   /**
    * Dessine la carte en continu (sous l'écran de chargement) jusqu'à ce que les images s'enchaînent
@@ -813,9 +826,12 @@ export async function createScene(
 
   // ---- Photos aériennes, du centre vers l'extérieur ------------------------------------------
   // Celles du domaine d'abord : la carte n'est montrée qu'une fois toutes posées (ou au bout de
-  // PHOTOS_MAX_MS, réseau lent), puis après quelques images régulières (warmUp).
-  const PHOTOS_MAX_MS = 20_000;
+  // PHOTOS_MAX_MS : sur un réseau lent, au pied des pistes, on n'attend pas, elles arrivent ensuite),
+  // puis après quelques images régulières (warmUp).
+  const PHOTOS_MAX_MS = 3000;
   let detailPhotos = 0;
+  /** Plus d'attente des photos : la mise en route a commencé. */
+  let photosLate = false;
   let photosReady: () => void = () => undefined;
   const photosDone = new Promise<void>((resolve) => (photosReady = resolve));
   if (!detailChunks.length) photosReady();
@@ -832,15 +848,52 @@ export async function createScene(
         await chunk.loadPhoto(abort.signal);
         dirty = true;
         if (chunk.spec.z === 13 && ++detailPhotos <= detailChunks.length) {
-          onProgress('Photos aériennes', 0.6 + (0.32 * detailPhotos) / detailChunks.length);
+          // Photo arrivée après le délai, carte déjà montrée : pas de retour à l'écran de chargement.
+          if (!photosLate) onProgress('Photos aériennes', 0.6 + (0.32 * detailPhotos) / detailChunks.length);
           if (detailPhotos === detailChunks.length) photosReady();
         }
       }
     }),
   );
   void Promise.race([photosDone, new Promise((resolve) => setTimeout(resolve, PHOTOS_MAX_MS))])
-    .then(() => (abort.signal.aborted ? undefined : warmUp()))
-    .then(() => !abort.signal.aborted && onProgress(null, 1));
+    .then(() => {
+      photosLate = true;
+      return abort.signal.aborted ? undefined : warmUp();
+    })
+    .then(() => {
+      if (abort.signal.aborted) return;
+      onProgress(null, 1);
+      void plantForest();
+    });
+
+  // ---- Sapins, une fois la carte montrée -------------------------------------------------------
+  // Une tuile par image au plus : la carte reste fluide pendant qu'ils poussent.
+  const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  const plantForest = async () => {
+    let compiled = false;
+    for (const job of treeJobs) {
+      const trees = await job.trees;
+      if (abort.signal.aborted) return;
+      const mesh = forest.plant(job.chunk, trees);
+      if (!mesh) continue;
+      if (!compiled) {
+        // Programme de dessin des sapins préparé avant le premier (le même pour toutes les tuiles).
+        compiled = true;
+        mesh.visible = true;
+        mesh.count = trees.length / TREE_FLOATS;
+        try {
+          await renderer.compileAsync(mesh, camera, scene);
+        } catch {
+          // Préparé au premier dessin.
+        }
+        if (abort.signal.aborted) return;
+      }
+      forest.group.add(mesh);
+      dirty = true;
+      await nextFrame();
+    }
+    worker?.dispose();
+  };
 
   const v = new THREE.Vector3();
   return {
@@ -910,6 +963,7 @@ export async function createScene(
     },
     dispose() {
       abort.abort();
+      worker?.dispose();
       clearTimeout(scaleTimer);
       renderer.setAnimationLoop(null);
       resize.disconnect();

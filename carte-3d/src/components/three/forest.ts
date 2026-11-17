@@ -1,18 +1,16 @@
 // Sapins de la carte Three.js : le même sapin à trois étages que la carte MapLibre
 // (forestInstanced.ts), répété par instanciation, planté par forestPlanting.ts (même
-// grille, mêmes clairières le long des pistes et remontées). Une forêt instanciée par
-// tuile du relief ; au loin, on ne dessine qu'une partie des arbres (les premiers par
-// rang), sans rien refabriquer.
+// grille, mêmes clairières le long des pistes et remontées) dans le worker du relief.
+// Une forêt instanciée par tuile du relief ; au loin, on ne dessine qu'une partie des
+// arbres (les premiers par rang), sans rien refabriquer.
 
 import * as THREE from 'three/webgpu';
-import { attribute, color, instancedBufferAttribute, mix } from 'three/tsl';
-import { GREENS, SNOW_CAP, TREE_INSTANCE_FLOATS, buildForestSet, plantTileInstances, setClearings, type Clearing } from '@/components/domain/forestPlanting';
+import { attribute, color, mix } from 'three/tsl';
+import { GREENS, SNOW_CAP } from '@/components/domain/forestPlanting';
 import type { Elevation } from './elevation';
 import { EXAGGERATION, type Frame } from './geo';
 import type { Chunk } from './terrain';
-
-/** Zoom des tuiles de plantation : un arbre tous les ~17 m. */
-const PLANT_ZOOM = 15;
+import { TREE_FLOATS } from './terrainWorker';
 
 /** Étages : rayon (× largeur de l'arbre), bas, sommet (× hauteur), neige au sommet, rotation. */
 const TIERS: [number, number, number, number, number][] = [
@@ -69,6 +67,11 @@ export interface Forest {
   group: THREE.Group;
   chunks: ChunkForest[];
   total: number;
+  /**
+   * Sapins d'une tuile du relief (plantés par le worker, voir terrainWorker.ts) : renvoie le
+   * maillage à ajouter (à `group`), ou null sans arbre.
+   */
+  plant(chunk: Chunk, trees: Float32Array): THREE.InstancedMesh | null;
   /** Densité selon la distance à la caméra ; renvoie le nombre d'arbres dessinés. */
   update(camera: THREE.Camera, densityScale: number): number;
 }
@@ -81,79 +84,62 @@ function densityAt(distance: number): number {
   return 0;
 }
 
-export function buildForest(
-  frame: Frame,
-  elev: Elevation,
-  forests: GeoJSON.FeatureCollection,
-  clearings: Clearing[],
-  chunks: Chunk[],
-): Forest {
-  const polygons: number[][][][] = [];
-  for (const f of forests.features) {
-    const g = f.geometry;
-    if (g.type === 'Polygon') polygons.push(g.coordinates);
-    else if (g.type === 'MultiPolygon') polygons.push(...g.coordinates);
-  }
-  const set = buildForestSet(polygons);
-  setClearings(set, clearings);
-
-  const geometry = treeGeometry();
+/**
+ * Forêt vide, garnie tuile par tuile (`plant`) une fois la carte affichée. Un seul matériau pour
+ * toutes les tuiles (teinte de chaque arbre portée par la géométrie) : un seul programme de
+ * dessin à préparer, quel que soit le nombre de tuiles.
+ */
+export function createForest(frame: Frame, elev: Elevation): Forest {
+  const base = treeGeometry();
   const greens = GREENS.map((c) => new THREE.Color(c));
+  const material = new THREE.MeshStandardNodeMaterial({ roughness: 1, metalness: 0 });
+  material.colorNode = mix(attribute('tint', 'vec3'), color(SNOW_CAP), attribute('snow', 'float'));
   const group = new THREE.Group();
   const out: ChunkForest[] = [];
-  let total = 0;
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
   const p = new THREE.Vector3();
 
-  for (const chunk of chunks) {
-    const { z, x, y } = chunk.spec;
-    const per = 2 ** (PLANT_ZOOM - z);
-    const trees: { x: number; y: number; z: number; h: number; w: number; green: number; rank: number }[] = [];
-    for (let i = 0; i < per; i++) {
-      for (let j = 0; j < per; j++) {
-        const tx = x * per + i;
-        const ty = y * per + j;
-        const { data, ranks } = plantTileInstances(set, PLANT_ZOOM, tx, ty);
-        const n = 2 ** PLANT_ZOOM;
-        for (let t = 0; t < ranks.length; t++) {
-          const o = t * TREE_INSTANCE_FLOATS;
-          const [wx, wz] = frame.mercToXZ(data[o] + tx / n, data[o + 1] + ty / n);
-          trees.push({ x: wx, z: wz, y: elev.atOr0(wx, wz) * EXAGGERATION, h: data[o + 2], w: data[o + 3], green: data[o + 4], rank: ranks[t] });
-        }
-      }
-    }
-    if (!trees.length) continue;
-    trees.sort((a, b) => a.rank - b.rank);
-
-    const tint = new Float32Array(trees.length * 3);
-    const material = new THREE.MeshStandardNodeMaterial({ roughness: 1, metalness: 0 });
-    material.colorNode = mix(instancedBufferAttribute(new THREE.InstancedBufferAttribute(tint, 3), 'vec3'), color(SNOW_CAP), attribute('snow', 'float'));
-    const mesh = new THREE.InstancedMesh(geometry, material, trees.length);
-    const ranks = new Float32Array(trees.length);
-    trees.forEach((t, i) => {
-      // Les sapins s'enfoncent un peu : jamais de pied en l'air sur une pente.
-      p.set(t.x, t.y - 1.5, t.z);
-      s.set(t.w, t.h, t.w);
-      m.compose(p, q, s);
-      mesh.setMatrixAt(i, m);
-      const c = greens[t.green] ?? greens[0];
-      tint.set([c.r, c.g, c.b], i * 3);
-      ranks[i] = t.rank;
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingSphere();
-    mesh.frustumCulled = true;
-    group.add(mesh);
-    out.push({ mesh, center: chunk.center, ranks });
-    total += trees.length;
-  }
-
-  return {
+  const forest: Forest = {
     group,
     chunks: out,
-    total,
+    total: 0,
+    plant(chunk, trees) {
+      const count = trees.length / TREE_FLOATS;
+      if (!count) return null;
+      const { z, x, y } = chunk.spec;
+      const n = 2 ** z;
+      const geometry = new THREE.BufferGeometry();
+      for (const name of ['position', 'normal', 'snow']) geometry.setAttribute(name, base.getAttribute(name));
+      const tint = new Float32Array(count * 3);
+      geometry.setAttribute('tint', new THREE.InstancedBufferAttribute(tint, 3));
+      const mesh = new THREE.InstancedMesh(geometry, material, count);
+      const ranks = new Float32Array(count);
+      for (let i = 0; i < count; i++) {
+        const o = i * TREE_FLOATS;
+        const [wx, wz] = frame.mercToXZ(x / n + trees[o], y / n + trees[o + 1]);
+        // Les sapins s'enfoncent un peu : jamais de pied en l'air sur une pente.
+        p.set(wx, elev.atOr0(wx, wz) * EXAGGERATION - 1.5, wz);
+        s.set(trees[o + 3], trees[o + 2], trees[o + 3]);
+        m.compose(p, q, s);
+        mesh.setMatrixAt(i, m);
+        const c = greens[trees[o + 4]] ?? greens[0];
+        tint[i * 3] = c.r;
+        tint[i * 3 + 1] = c.g;
+        tint[i * 3 + 2] = c.b;
+        ranks[i] = trees[o + 5];
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      mesh.frustumCulled = true;
+      // Pas encore dessiné : la prochaine mise à jour de la densité en décide.
+      mesh.count = 0;
+      mesh.visible = false;
+      out.push({ mesh, center: chunk.center, ranks });
+      forest.total += count;
+      return mesh;
+    },
     update(camera, densityScale) {
       let drawn = 0;
       for (const c of out) {
@@ -173,4 +159,5 @@ export function buildForest(
       return drawn;
     },
   };
+  return forest;
 }

@@ -24,6 +24,8 @@ export interface Elevation {
   atOr0(x: number, z: number): number;
   /** Altitudes brutes (256 × 256, m) d'une tuile chargée, ou null. */
   tile(zoom: number, x: number, y: number): Float32Array | null;
+  /** Toutes les tuiles chargées d'un zoom. */
+  tiles(zoom: number): { x: number; y: number; alt: Float32Array }[];
 }
 
 async function decode(z: number, x: number, y: number): Promise<Float32Array | null> {
@@ -102,5 +104,6 @@ export async function loadElevation(frame: Frame, levels: { zoom: number; tiles:
     at,
     atOr0: (x, z) => at(x, z) ?? 0,
     tile: (zoom, x, y) => loaded.find((l) => l.zoom === zoom)?.tiles.get(key(x, y)) ?? null,
+    tiles: (zoom) => [...(loaded.find((l) => l.zoom === zoom)?.tiles ?? [])].map(([k, alt]) => ({ x: Math.floor(k / 4_194_304), y: k % 4_194_304, alt })),
   };
 }
